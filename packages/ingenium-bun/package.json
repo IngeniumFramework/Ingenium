@@ -24,7 +24,7 @@
     "ingenium": "*"
   },
   "devDependencies": {
-    "@types/bun": "^1.1.0",
-    "vitest": "^2.0.0"
+    "@types/bun": "^1.3.14",
+    "vitest": "^4.1.7"
   }
 }
