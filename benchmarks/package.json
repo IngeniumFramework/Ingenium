@@ -25,7 +25,7 @@
     "tinybench": "^3.0.0"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
+    "@types/express": "^5.0.6",
     "tsx": "^4.19.0"
   }
 }
