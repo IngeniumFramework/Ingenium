@@ -92,13 +92,25 @@ describe('sessionMiddleware', () => {
     expect(() => sessionMiddleware({ secret: [] })).toThrow(/secret/)
   })
 
-  it('first request: no cookie → new session created, signed Set-Cookie sent', async () => {
+  it('first request: no cookie → session created but NO Set-Cookie by default', async () => {
     const store = new MemoryStore(0)
     const mw = sessionMiddleware({ secret: 'k', store })
     const ctx = makeCtx()
     await mw(ctx, noop)
     expect(ctx.session).toBeDefined()
     expect(typeof ctx.session.id).toBe('string')
+    // Default `saveUninitialized: false`: an empty, untouched session is NOT
+    // persisted or cookied — this is what stops a cookieless-request flood from
+    // filling the store (memory-DoS). A cookie is issued lazily on first write.
+    expect(getSetCookie(ctx)).toBeUndefined()
+    expect(store.size()).toBe(0)
+  })
+
+  it('first request with saveUninitialized:true → new session emits a signed Set-Cookie', async () => {
+    const store = new MemoryStore(0)
+    const mw = sessionMiddleware({ secret: 'k', store, saveUninitialized: true })
+    const ctx = makeCtx()
+    await mw(ctx, noop)
     const sc = getSetCookie(ctx)
     expect(sc).toBeDefined()
     const value = readCookieValue(sc!, 'ingenium.sid')!

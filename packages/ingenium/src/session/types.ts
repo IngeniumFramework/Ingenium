@@ -52,6 +52,16 @@ export interface SessionOptions {
    * even when the session data did not change. @default false
    */
   rolling?: boolean
+  /**
+   * If true, brand-new sessions are persisted (and a `Set-Cookie` issued) even
+   * when the handler never wrote to them. This gives anonymous flows a stable id
+   * across requests (CSRF tokens, A/B buckets) but means an unauthenticated,
+   * cookieless request flood creates one store entry each — a memory-DoS against
+   * the default in-process {@link MemoryStore}. Leave it off (the secure default)
+   * and sessions are persisted lazily on first write. Mirrors express-session's
+   * `saveUninitialized`. @default false
+   */
+  saveUninitialized?: boolean
   /** Cookie attribute overrides. */
   cookie?: SessionCookieOptions
   /**

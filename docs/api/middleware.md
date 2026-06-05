@@ -37,6 +37,7 @@ interface StaticOptions {
   maxAge?: number             // default 0 — Cache-Control: max-age, in MILLISECONDS (Express convention)
   extensions?: string[]       // default [] — fallback extensions to try when path doesn't exist
   dotfiles?: 'allow' | 'deny' | 'ignore'  // default 'ignore' — call next()
+  symlinks?: 'allow' | 'deny' // default 'deny' — realpath the target, 403 if it escapes root
 }
 ```
 
@@ -47,6 +48,7 @@ interface StaticOptions {
 - **Range requests** — `Range: bytes=N-M` returns 206 with `Content-Range`.
 - **MIME negotiation** from extension via an internal map; unknown extensions fall back to `application/octet-stream`.
 - **Path traversal protection** — `..` segments resolving outside `root` return 403.
+- **Symlink confinement** — with `symlinks: 'deny'` (default), the final target is `realpath`-resolved and a 403 is returned if it escapes `root`. This closes the escape where a symlink *inside* the root points outside it (the lexical `..` check can't see it). Set `symlinks: 'allow'` to skip the realpath check if you deliberately link assets in from outside the root.
 - **Dotfile policy** — `'ignore'` (default) calls `next()` so routes can 404, `'deny'` returns 403, `'allow'` serves normally.
 
 ```ts

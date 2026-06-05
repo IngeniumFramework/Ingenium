@@ -28,4 +28,20 @@ export interface StaticOptions {
    * - `'ignore'` — call `next()` (let routes 404 it). DEFAULT.
    */
   dotfiles?: 'allow' | 'deny' | 'ignore'
+
+  /**
+   * How to treat symlinks whose real target escapes `root`:
+   * - `'deny'`  — resolve the final target with `realpath` and 403 if it lands
+   *   outside the (realpath-resolved) root. DEFAULT.
+   * - `'allow'` — skip the realpath check and serve whatever the lexical path
+   *   resolves to, even across a symlink that points out of `root`.
+   *
+   * WHY the default is `'deny'`: the lexical `..`/confinement check is defeated
+   * by a symlink *inside* the root that points outside it (e.g. a link planted
+   * in a user-upload directory) — the joined path stays under root but the bytes
+   * served come from elsewhere. Resolving the real target closes that escape.
+   * Costs one extra `realpath` per served file; set `'allow'` if you
+   * deliberately symlink assets in from outside the root and accept the risk.
+   */
+  symlinks?: 'allow' | 'deny'
 }

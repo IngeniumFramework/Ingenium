@@ -23,8 +23,6 @@ function makeCtx(headers: Record<string, string> = {}): IngeniumContext & { sess
   return ctx as IngeniumContext & { session: Session }
 }
 
-const noop = async () => {}
-
 function getSetCookie(ctx: IngeniumContext): string | undefined {
   const v = ctx.getHeader('set-cookie')
   if (v === undefined) return undefined
@@ -57,7 +55,9 @@ describe('session cookie Secure default (security)', () => {
     const sessionMiddleware = await loadMiddleware('production')
     const mw = sessionMiddleware({ secret: 's3cret-key-value' })
     const ctx = makeCtx()
-    await mw(ctx, noop)
+    // Write to the session so it persists and a Set-Cookie is emitted (the
+    // default `saveUninitialized: false` doesn't cookie an untouched session).
+    await mw(ctx, async () => { ctx.session.set('t', 1) })
     expect(getSetCookie(ctx)).toContain('Secure')
   })
 
@@ -65,7 +65,9 @@ describe('session cookie Secure default (security)', () => {
     const sessionMiddleware = await loadMiddleware('development')
     const mw = sessionMiddleware({ secret: 's3cret-key-value' })
     const ctx = makeCtx()
-    await mw(ctx, noop)
+    // Write to the session so it persists and a Set-Cookie is emitted (the
+    // default `saveUninitialized: false` doesn't cookie an untouched session).
+    await mw(ctx, async () => { ctx.session.set('t', 1) })
     expect(getSetCookie(ctx)).not.toContain('Secure')
   })
 
@@ -76,7 +78,9 @@ describe('session cookie Secure default (security)', () => {
       cookie: { secure: false },
     })
     const ctx = makeCtx()
-    await mw(ctx, noop)
+    // Write to the session so it persists and a Set-Cookie is emitted (the
+    // default `saveUninitialized: false` doesn't cookie an untouched session).
+    await mw(ctx, async () => { ctx.session.set('t', 1) })
     expect(getSetCookie(ctx)).not.toContain('Secure')
   })
 
@@ -87,7 +91,9 @@ describe('session cookie Secure default (security)', () => {
       cookie: { secure: true },
     })
     const ctx = makeCtx()
-    await mw(ctx, noop)
+    // Write to the session so it persists and a Set-Cookie is emitted (the
+    // default `saveUninitialized: false` doesn't cookie an untouched session).
+    await mw(ctx, async () => { ctx.session.set('t', 1) })
     expect(getSetCookie(ctx)).toContain('Secure')
   })
 

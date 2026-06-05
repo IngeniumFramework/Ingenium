@@ -75,8 +75,10 @@ async function driveUpgrade(options: WebSocketHandlerOptions): Promise<Record<st
 
   // The upgrade handler does `await import('ws')` inside a microtask chain;
   // poll until THIS call's constructor has run (constructed grew past `before`).
-  for (let i = 0; i < 500 && constructed.length === before; i++) {
-    await new Promise((r) => setImmediate(r))
+  // Use a real-time (setTimeout) poll rather than setImmediate so a busy event
+  // loop under full-suite parallelism can't starve the wait and flake the test.
+  for (let i = 0; i < 2000 && constructed.length === before; i++) {
+    await new Promise((r) => setTimeout(r, 1))
   }
   await registrar.close()
   const last = constructed[constructed.length - 1]

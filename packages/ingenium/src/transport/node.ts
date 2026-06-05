@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import type { Socket } from 'node:net'
 import type { IngeniumContext } from '../context/context.ts'
 import type { HttpMethod } from '../router/types.ts'
-import { createByteLimit } from '../body/limit.ts'
+import { attachBodyWithLimit, rejectIfContentLengthTooBig } from './body-limit.ts'
 import type { CloseOptions, ListeningServer, Transport, TransportHooks } from './types.ts'
 
 /**
@@ -108,44 +108,6 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, hooks: T
   }
 }
 
-/**
- * Returns `true` (and writes a 413 response) if the request advertises a
- * Content-Length greater than `maxRequestBytes`. Returns `false` for missing,
- * invalid, or in-range Content-Length values — those cases are handled by
- * the byte-limit Transform downstream.
- */
-function rejectIfContentLengthTooBig(
-  req: IncomingMessage,
-  res: ServerResponse,
-  maxRequestBytes: number,
-): boolean {
-  if (!Number.isFinite(maxRequestBytes)) return false
-  const raw = req.headers['content-length']
-  if (typeof raw !== 'string' || raw.length === 0) return false
-  const n = Number(raw)
-  // Reject only on a well-formed, non-negative integer over the cap. A
-  // negative, fractional, NaN, or > 2^53 Content-Length is malformed: it must
-  // NOT slip past as "valid and in-range" (which would then feed a bogus value
-  // into downstream buffer pre-sizing in populateContext). Treat it as
-  // missing/invalid → false here, letting the byte-limit Transform enforce the
-  // real cap on the actual bytes received.
-  if (!Number.isSafeInteger(n) || n < 0) return false
-  if (n <= maxRequestBytes) return false
-
-  res.statusCode = 413
-  res.setHeader('content-type', 'application/json; charset=utf-8')
-  res.setHeader('connection', 'close')
-  res.end(
-    JSON.stringify({
-      error: `Request body exceeded ${maxRequestBytes} bytes`,
-      code: 'PAYLOAD_TOO_LARGE',
-    }),
-  )
-  // Hint the kernel to drop any pending body bytes; we never read them.
-  req.socket?.destroy()
-  return true
-}
-
 function populateContext(ctx: IngeniumContext, req: IncomingMessage, maxRequestBytes: number): void {
   ctx.method = (req.method ?? 'GET') as HttpMethod
   ctx.url = req.url ?? '/'
@@ -164,73 +126,8 @@ function populateContext(ctx: IngeniumContext, req: IncomingMessage, maxRequestB
   // Detect TLS via the socket's `encrypted` flag (set by tls.TLSSocket).
   ctx.baseProtocol = (req.socket as { encrypted?: boolean })?.encrypted ? 'https' : 'http'
 
-  // Wire body lazily — the source stream is only consumed if a body method is called.
-  const cl = req.headers['content-length']
-  // Only treat a well-formed, non-negative integer as a known length. A
-  // negative/fractional/NaN/unsafe value must NOT flow into the byte-cap
-  // `knownSafe` short-circuit (it could declare a tiny length and bypass the
-  // Transform) nor into `_attach`'s pre-sizing hint below.
-  const parsedCl = cl ? Number(cl) : undefined
-  const contentLength =
-    parsedCl !== undefined && Number.isSafeInteger(parsedCl) && parsedCl >= 0 ? parsedCl : undefined
-  const ct = req.headers['content-type']
-  // Wrap the raw IncomingMessage in a transport-level byte-limit so the cap
-  // applies to EVERY consumer, including `ctx.body.stream()`. We skip the
-  // wrap in three provably-safe cases:
-  //
-  //   1. The request is structurally body-less (GET/HEAD/OPTIONS or
-  //      Content-Length: 0). No body to cap.
-  //   2. The cap is disabled (Number.POSITIVE_INFINITY).
-  //   3. Content-Length is declared AND ≤ cap. The pre-check
-  //      (`rejectIfContentLengthTooBig`) already verified this; node:http
-  //      itself enforces the declared length and stops reading at the
-  //      byte count, so the body cannot exceed the cap. The Transform
-  //      would be redundant defense in this path.
-  //
-  // Chunked encoding (no Content-Length) keeps the Transform — that's
-  // where the cap actually matters, because the client controls the
-  // stream length without any prior declaration.
-  const noBody =
-    contentLength === 0 ||
-    ctx.method === 'GET' ||
-    ctx.method === 'HEAD' ||
-    ctx.method === 'OPTIONS'
-  const knownSafe =
-    contentLength !== undefined &&
-    Number.isFinite(contentLength) &&
-    contentLength <= maxRequestBytes
-  if (noBody || !Number.isFinite(maxRequestBytes) || knownSafe) {
-    ctx.body._attach(req, ct, Number.isFinite(contentLength) ? contentLength : undefined)
-    return
-  }
-
-  // Cap unknown-length (chunked) bodies with a byte-limit Transform. `pipe()`
-  // does NOT forward `'error'` events, so when the chunked path in
-  // `IngeniumBody.buffer` re-pipes this Transform into a SECOND limiter and only
-  // listens on the downstream pipe, the cap error here would (a) be an
-  // unhandled-error crash and (b) never reach that downstream — so the
-  // consumer's promise would hang. Attach a guard `'error'` listener and
-  // forward the error to every stream this Transform was piped into. We leave
-  // `req`/its socket alone so the response (413) can still flush.
-  const limited = createByteLimit(maxRequestBytes)
-  const downstream = new Set<{ destroy(err?: Error): void; destroyed: boolean }>()
-  const origPipe = limited.pipe.bind(limited) as typeof limited.pipe
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  limited.pipe = function pipe(dest: any, ...rest: any[]) {
-    downstream.add(dest)
-    return origPipe(dest, ...rest)
-  } as typeof limited.pipe
-  limited.on('error', (err: Error) => {
-    for (const dest of downstream) {
-      if (!dest.destroyed) dest.destroy(err)
-    }
-    // Discard the rest of the inbound body so the socket can be reused/closed.
-    req.unpipe(limited)
-    req.on('error', () => {})
-    req.resume()
-  })
-  req.pipe(limited)
-  ctx.body._attach(limited, ct, Number.isFinite(contentLength) ? contentLength : undefined)
+  // Wire body lazily with the transport byte-cap (shared with the WS adapter).
+  attachBodyWithLimit(ctx, req, maxRequestBytes)
 }
 
 function writeResponse(ctx: IngeniumContext, res: ServerResponse): void {

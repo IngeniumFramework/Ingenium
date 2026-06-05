@@ -21,7 +21,13 @@ export interface MultipartOptions {
 
 /** A single uploaded file part, fully buffered. */
 export interface MultipartFile {
-  /** Original filename as supplied by the client. */
+  /**
+   * Original filename as supplied by the client — UNTRUSTED. It is preserved
+   * verbatim (the parser does not sanitize it) and may contain path separators,
+   * `..`, or NUL bytes. NEVER pass it directly to `fs`/`path.join` when writing
+   * uploads: derive your own name or `path.basename()` + allowlist it first,
+   * otherwise an attacker can traverse out of the upload directory.
+   */
   filename: string
   /** MIME type from the part's `Content-Type` header (defaults to `application/octet-stream`). */
   mimeType: string

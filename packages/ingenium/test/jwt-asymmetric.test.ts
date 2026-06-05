@@ -337,12 +337,11 @@ describe('jwtMiddleware — JWKS', () => {
     const p1 = mw(c1, next)
     const p2 = mw(c2, next)
 
-    // The middleware `await`s `getToken` before it ever reaches `fetchJwks`,
-    // so `fetch` is dispatched on a later microtask — not synchronously here.
-    // Flush the microtask queue so both calls have entered `fetchJwks` before
-    // we assert. Both should then be awaiting the SAME in-flight fetch.
-    await new Promise((r) => setTimeout(r, 0))
-    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // The middleware `await`s `getToken` and the SSRF resolve-and-check before
+    // it ever reaches `fetch`, so the network call is dispatched a few async
+    // hops later. Wait until it lands rather than assuming a single tick. Both
+    // calls should collapse onto the SAME in-flight fetch — exactly one call.
+    await vi.waitFor(() => expect(fetchSpy).toHaveBeenCalledTimes(1))
 
     resolveFetch(jwksResponse('jwks-k1', rsa.publicKey))
     await Promise.all([p1, p2])

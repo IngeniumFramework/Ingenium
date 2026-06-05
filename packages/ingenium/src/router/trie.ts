@@ -181,13 +181,20 @@ export class RouterTrie {
       if (node.paramChild) {
         // Hot-path gate: only constrained params (a tiny minority of routes)
         // run a regex. The field load + `!== null` is one branch; unconstrained
-        // routes never touch `.test()`, so they pay zero extra cost. Constrained
-        // routes pay one anchored `.test()` against the raw segment — justified
-        // because the alternative (matching, then 404ing in user code) is both
-        // slower and wrong (a sibling `*wild` could legitimately catch it).
+        // routes never touch `.test()`, so they pay zero extra cost.
+        //
+        // SECURITY: a constrained param MUST be tested against the SAME string
+        // the handler receives — i.e. the DECODED value — not the raw
+        // percent-encoded segment. Testing the raw segment lets `%2f`/`%2e`/`%00`
+        // smuggle a '/' '.' or NUL past a constraint that was written to forbid
+        // them (e.g. `:file([^/]+)` used as a traversal guard). We decode first
+        // (cheap: `decodeParam` no-ops when there's no '%'), then test, then
+        // push the decoded value — so a decoded '/' fails `^(?:[^/]+)$` as the
+        // route author intended.
         const constraint = node.paramChild.paramConstraint
-        if (constraint === null || constraint.test(seg)) {
-          paramValues.push(decodeParam(seg))
+        const decoded = decodeParam(seg)
+        if (constraint === null || constraint.test(decoded)) {
+          paramValues.push(decoded)
           node = node.paramChild
           i++
           continue

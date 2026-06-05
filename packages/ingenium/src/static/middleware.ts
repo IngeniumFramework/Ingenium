@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { stat, realpath } from 'node:fs/promises'
 import * as path from 'node:path'
 import type { Stats } from 'node:fs'
 import type { IngeniumMiddleware } from '../middleware/types.ts'
@@ -115,6 +115,24 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
   const cacheControl = `public, max-age=${Math.floor(maxAgeMs / 1000)}`
   const extensions = opts.extensions ?? []
   const dotfiles = opts.dotfiles ?? 'ignore'
+  const followSymlinks = (opts.symlinks ?? 'deny') === 'allow'
+
+  // Realpath-resolved root, computed once and memoized. Resolving the root too
+  // (not just the target) keeps the common "root is itself a symlink" deploy —
+  // Capistrano-style `current -> releases/xyz`, or macOS `/var -> /private/var`
+  // tmpdirs — working: both sides go through realpath so containment compares
+  // like-for-like. Falls back to the lexical root if realpath fails (root not
+  // yet created); the lexical confinement check above still applies.
+  let realRootCache: string | null = null
+  const getRealRoot = async (): Promise<string> => {
+    if (realRootCache !== null) return realRootCache
+    try {
+      realRootCache = await realpath(absRoot)
+    } catch {
+      realRootCache = absRoot
+    }
+    return realRootCache
+  }
 
   return async (ctx, next) => {
     // Only GET / HEAD make sense for static.
@@ -215,6 +233,25 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
         return next()
       }
       // 'allow' falls through.
+    }
+
+    // Symlink confinement: the lexical checks above only see the join, so a
+    // symlink INSIDE root pointing OUT of it (joined path stays under root, real
+    // bytes live elsewhere) still escapes. Resolve the real target and confirm
+    // it stays under the real root. One extra realpath per served file; skipped
+    // entirely when `symlinks: 'allow'`. A broken/dangling link → next().
+    if (!followSymlinks) {
+      let realTarget: string
+      try {
+        realTarget = await realpath(target)
+      } catch {
+        return next()
+      }
+      const realRoot = await getRealRoot()
+      if (!isUnderRoot(realRoot, realTarget)) {
+        ctx.status(403).text('Forbidden')
+        return
+      }
     }
 
     // ───── Cacheable response headers ─────

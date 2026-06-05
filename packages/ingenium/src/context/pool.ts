@@ -21,6 +21,12 @@ export class IngeniumContextPool {
 
   /** Reset and return the context to the free list (or discard if full). */
   release(ctx: IngeniumContext): void {
+    // A context whose dispatch timed out is POISONED: the orphaned handler is
+    // still running and may write to it (headers/status are not epoch-guarded).
+    // Discard it WITHOUT reset/reuse so those late writes land on an object
+    // that is never bound to another request, then get GC'd once the orphan
+    // finishes. Reusing it would let request A's late writes corrupt request B.
+    if (ctx._timedOut) return
     ctx.reset()
     if (this.pool.length < this.max) this.pool.push(ctx)
   }

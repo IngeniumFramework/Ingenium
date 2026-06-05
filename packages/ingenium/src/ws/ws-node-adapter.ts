@@ -13,6 +13,7 @@ import type { Socket } from 'node:net'
 import { Buffer } from 'node:buffer'
 import type { IngeniumContext } from '../context/context.ts'
 import type { HttpMethod } from '../router/types.ts'
+import { attachBodyWithLimit, rejectIfContentLengthTooBig } from '../transport/body-limit.ts'
 import type {
   CloseOptions,
   ListeningServer,
@@ -100,9 +101,15 @@ export class WsNodeAdapter implements Transport {
 }
 
 async function handleRequest(req: IncomingMessage, res: ServerResponse, hooks: TransportHooks): Promise<void> {
+  // Mirror the core NodeAdapter's body-size enforcement — without this, enabling
+  // WebSockets silently dropped the transport-level cap that protects
+  // `ctx.body.stream()` consumers from unbounded chunked/large bodies.
+  const maxBytes = hooks.maxRequestBytes ?? Number.POSITIVE_INFINITY
+  if (rejectIfContentLengthTooBig(req, res, maxBytes)) return
+
   const ctx = hooks.acquire()
   try {
-    populateContext(ctx, req)
+    populateContext(ctx, req, maxBytes)
     await hooks.dispatch(ctx)
     writeResponse(ctx, res)
   } finally {
@@ -110,7 +117,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, hooks: T
   }
 }
 
-function populateContext(ctx: IngeniumContext, req: IncomingMessage): void {
+function populateContext(ctx: IngeniumContext, req: IncomingMessage, maxRequestBytes: number): void {
   ctx.method = (req.method ?? 'GET') as HttpMethod
   ctx.url = req.url ?? '/'
   const url = ctx.url
@@ -123,11 +130,10 @@ function populateContext(ctx: IngeniumContext, req: IncomingMessage): void {
     ctx.rawQuery = ''
   }
   ctx.headers = req.headers
+  ctx.remoteAddress = req.socket?.remoteAddress ?? '127.0.0.1'
+  ctx.baseProtocol = (req.socket as { encrypted?: boolean })?.encrypted ? 'https' : 'http'
 
-  const cl = req.headers['content-length']
-  const contentLength = cl ? Number(cl) : undefined
-  const ct = req.headers['content-type']
-  ctx.body._attach(req, ct, Number.isFinite(contentLength) ? contentLength : undefined)
+  attachBodyWithLimit(ctx, req, maxRequestBytes)
 }
 
 function writeResponse(ctx: IngeniumContext, res: ServerResponse): void {

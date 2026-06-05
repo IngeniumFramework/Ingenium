@@ -36,6 +36,13 @@ import type { JobHandle, QueueOptions, QueueWorker } from './jobs/types.ts'
 import { CronRegistry } from './cron/registry.ts'
 import type { CronHandler, CronOptions } from './cron/scheduler.ts'
 
+/**
+ * Read once at module load so production builds dead-code-eliminate dev-only
+ * diagnostics and so the default error boundary can suppress internal-message
+ * leakage in production. See CLAUDE.md "Dev-mode diagnostics".
+ */
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
 /** Options accepted by `ingenium(...)` and `new IngeniumApp(...)`. */
 export interface IngeniumAppOptions {
   /** Max number of pooled `IngeniumContext` instances kept in the free list. Default 1024. */
@@ -1198,8 +1205,13 @@ function writeDefaultError(err: unknown, ctx: IngeniumContext): void {
     ctx.json(payload, err.statusCode)
     return
   }
-  // Unknown error → 500
-  const message = (err as Error)?.message ?? 'Internal Server Error'
+  // Unknown error → 500. NEVER surface the raw exception message in production:
+  // a thrown Error from a downstream library leaks internal detail (DB DSNs with
+  // hosts/credentials, absolute file paths, driver internals). Mirror the
+  // RFC7807 serializer (problem/serialize.ts), which gates this same exposure
+  // behind IS_DEV. IngeniumError messages above are framework/developer-authored
+  // and intentionally exposed; raw thrown values are not.
+  const message = IS_DEV ? ((err as Error)?.message ?? 'Internal Server Error') : 'Internal Server Error'
   ctx.json({ error: message, code: 'INTERNAL_ERROR' }, 500)
 }
 
@@ -1566,11 +1578,14 @@ function raceWithTimeout(
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
-      // Bump the epoch so the orphaned handler's late writes are detected
-      // by the guard wrappers as stale and discarded. This is what
-      // prevents cross-request response corruption when the ctx is
-      // recycled and rebound to a new request.
+      // Bump the epoch so the orphaned handler's late *body* writes are
+      // detected by the guard wrappers as stale and discarded, AND poison the
+      // context so the pool discards rather than reuses it — closing the
+      // header/status late-write path that the body-only guard can't cover.
+      // Together these prevent cross-request response corruption when a handler
+      // outlives its deadline.
       if (ctx._epoch === capturedEpoch) ctx._epoch++
+      ctx._timedOut = true
       reject(new IngeniumTimeoutError(timeoutMs))
     }, timeoutMs)
     // Crucially, never keep the event loop alive. A handler that resolves

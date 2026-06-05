@@ -18,11 +18,17 @@ export const HTTP_METHODS: readonly HttpMethod[] = [
  * - `:name?`          → optional string (becomes `string | undefined`)
  * - `:name(regex)`    → required string. The regex is type-stripped here, but
  *                       the constraint IS enforced at runtime by the trie
- *                       (`RouterTrie.find` tests the segment against the
+ *                       (`RouterTrie.find` tests the DECODED segment against the
  *                       compiled, fully-anchored pattern), so the `string`
- *                       type is honest about the matched shape.
- *                       Note: number-narrowing (typing `:id(\d+)` as `number`)
- *                       remains deferred — constrained params stay `string`.
+ *                       type is honest about the matched shape — and a constraint
+ *                       like `:file([^/]+)` is a real guard against a decoded
+ *                       `%2f`. Note: number-narrowing (typing `:id(\d+)` as
+ *                       `number`) remains deferred — constrained params stay
+ *                       `string`.
+ *                       SECURITY: an UNCONSTRAINED `:name` is NOT a traversal
+ *                       guard — its value is URL-decoded, so it may contain '/'
+ *                       (via `%2f`), '.', or NUL. Add a constraint, or sanitize
+ *                       before using a param in a filesystem/URL/identifier sink.
  * - `*name`           → required string (greedy wildcard tail)
  *
  * @example

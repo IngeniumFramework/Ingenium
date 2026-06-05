@@ -1,4 +1,5 @@
 import { createPublicKey, type KeyObject } from 'node:crypto'
+import { lookup } from 'node:dns/promises'
 
 /**
  * In-memory JWKS cache.
@@ -119,6 +120,26 @@ export function clearJwksCache(): void {
   cache.clear()
 }
 
+/**
+ * Collapse an IPv4-mapped (`::ffff:a.b.c.d` / `::ffff:hhhh:hhhh`) or deprecated
+ * IPv4-compatible (`::a.b.c.d`) IPv6 form to its embedded dotted IPv4. Returns
+ * the input unchanged when it isn't one of those forms. Input is assumed
+ * already lowercased and bracket/zone-stripped.
+ */
+function unwrapV4MappedV6(h: string): string {
+  // Dotted forms: ::ffff:1.2.3.4 (from getaddrinfo) and ::1.2.3.4 (deprecated).
+  const dotted = /^::(?:ffff:)?(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/.exec(h)
+  if (dotted) return dotted[1]!
+  // Hex form: ::ffff:a9fe:a9fe (what `new URL()` canonicalizes the literal to).
+  const hex = /^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(h)
+  if (hex) {
+    const hi = parseInt(hex[1]!, 16)
+    const lo = parseInt(hex[2]!, 16)
+    return `${(hi >> 8) & 0xff}.${hi & 0xff}.${(lo >> 8) & 0xff}.${lo & 0xff}`
+  }
+  return h
+}
+
 /** Loopback/test hostnames we permit over plain `http:` (local test servers). */
 function isLocalhostHost(hostname: string): boolean {
   // URL hosts wrap IPv6 literals in brackets; strip them before comparing.
@@ -150,11 +171,20 @@ function isBlockedJwksHost(hostname: string): boolean {
   if (pct !== -1) h = h.slice(0, pct)
   h = h.toLowerCase()
 
+  // Collapse IPv4-mapped / IPv4-compatible IPv6 to the embedded IPv4 BEFORE the
+  // checks below. Without this, `::ffff:169.254.169.254` (and the hex form
+  // `::ffff:a9fe:a9fe` that `new URL()` canonicalizes to) never matches the
+  // dotted-IPv4 regex and isn't in the IPv6 prefix list — so a colon-bearing
+  // literal pointing at loopback/metadata/RFC1918 would sail through. fetch
+  // still routes these to the embedded IPv4 host, so the guard must too.
+  h = unwrapV4MappedV6(h)
+
   // IPv4 private / loopback / link-local literals.
   const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h)
   if (v4) {
     const a = Number(v4[1])
     const b = Number(v4[2])
+    if (a === 0) return true // 0.0.0.0/8 "this host" — routes to localhost on many stacks
     if (a === 10) return true // 10.0.0.0/8
     if (a === 127) return true // 127.0.0.0/8 loopback
     if (a === 169 && b === 254) return true // 169.254.0.0/16 link-local
@@ -172,6 +202,45 @@ function isBlockedJwksHost(hostname: string): boolean {
   return false
 }
 
+/**
+ * Resolve `hostname` and reject if ANY resolved address lands in private /
+ * loopback / link-local space.
+ *
+ * WHY: `isBlockedJwksHost` only catches IP *literals*. A hostname that resolves
+ * to 169.254.169.254 (cloud metadata), 127.0.0.1, or RFC1918 space sails
+ * straight past the literal check — the exact bypass that bites once `jwksUrl`
+ * is driven by tenant / discovery input rather than static operator config. We
+ * resolve every A/AAAA record and block if any one is internal.
+ *
+ * Residual risk: this narrows but does not fully close DNS rebinding. There is
+ * a TOCTOU window between this lookup and the resolution `fetch` performs when
+ * it connects, so a hostile resolver could answer "public" here and "private"
+ * to fetch. Fully closing it requires pinning the validated address into the
+ * connection (a custom dispatcher). For a static, operator-controlled jwksUrl
+ * resolve-and-check is sufficient; if you ever drive jwksUrl from untrusted
+ * input, pin instead.
+ *
+ * A resolution *failure* is deliberately swallowed rather than treated as
+ * blocked: if the name can't be resolved here, `fetch` can't connect to it
+ * either, so there is no internal target to forge a request against. Throwing
+ * would only turn transient DNS hiccups into auth outages.
+ */
+async function assertResolvedHostAllowed(hostname: string): Promise<void> {
+  // Strip IPv6 brackets before handing the bare host to the resolver.
+  const h = hostname.startsWith('[') && hostname.endsWith(']') ? hostname.slice(1, -1) : hostname
+  let addrs: Array<{ address: string }>
+  try {
+    addrs = await lookup(h, { all: true })
+  } catch {
+    return // unresolvable → fetch will fail anyway; nothing to guard against.
+  }
+  for (const { address } of addrs) {
+    if (isBlockedJwksHost(address)) {
+      throw new Error('jwks_fetch_failed')
+    }
+  }
+}
+
 async function doFetch(url: string): Promise<Map<string, KeyObject>> {
   let res: Response
   try {
@@ -185,8 +254,14 @@ async function doFetch(url: string): Promise<Map<string, KeyObject>> {
     if (parsed.protocol !== 'https:' && !localAllowed) {
       throw new Error('jwks_fetch_failed')
     }
-    if (!localAllowed && isBlockedJwksHost(parsed.hostname)) {
-      throw new Error('jwks_fetch_failed')
+    if (!localAllowed) {
+      // Literal-IP block first (cheap, no I/O), then a resolve-and-check so a
+      // hostname that resolves into internal space can't slip past the literal
+      // guard. See `assertResolvedHostAllowed` for the rebinding caveat.
+      if (isBlockedJwksHost(parsed.hostname)) {
+        throw new Error('jwks_fetch_failed')
+      }
+      await assertResolvedHostAllowed(parsed.hostname)
     }
     res = await fetch(url, { redirect: 'error', signal: AbortSignal.timeout(5000) })
   } catch {

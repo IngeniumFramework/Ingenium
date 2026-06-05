@@ -152,15 +152,37 @@ describe('inline param constraints — runtime enforcement', () => {
     expect(isHit(alpha) && alpha.params).toEqual({ id: 'abc' })
   })
 
-  it('constraint tests the RAW segment, value is still URL-decoded', () => {
+  // SECURITY: the constraint must govern the SAME string the handler receives —
+  // the DECODED value — so a constraint used as an input filter can't be
+  // bypassed by percent-encoding the forbidden characters.
+  it('enforces the constraint against the DECODED value, blocking %2f traversal', () => {
     const trie = new RouterTrie()
-    // `%` and hex letters are allowed so the encoded segment passes the test;
-    // the constraint runs against the raw (pre-decode) segment, but the stored
-    // param value is decoded.
-    register(trie, 'GET', '/q/:term([a-z%0-9]+)')
+    // `[^/]+` is the idiomatic "single path segment" guard. It must reject a
+    // value that DECODES to contain a slash, even though the raw encoded
+    // segment has no literal '/'.
+    register(trie, 'GET', '/files/:name([^/]+)')
+    const result = trie.find('GET', '/files/..%2f..%2fetc%2fpasswd')
+    expect(isHit(result)).toBe(false)
+    expect(!isHit(result) && result.kind).toBe('not-found')
+  })
+
+  it('runs the constraint on the decoded value AND stores the decoded value', () => {
+    const trie = new RouterTrie()
+    // Space is in the class, so the decoded "hello world" matches and is exactly
+    // what the handler receives — proving the test and the capture use one string.
+    register(trie, 'GET', '/q/:term([a-z ]+)')
     const result = trie.find('GET', '/q/hello%20world')
     expect(isHit(result)).toBe(true)
     if (isHit(result)) expect(result.params).toEqual({ term: 'hello world' })
+  })
+
+  it('blocks a NUL byte smuggled via %00 in the decoded value', () => {
+    const trie = new RouterTrie()
+    // Raw "abc%00def" passes [a-z%0-9]+, but the decoded value contains a NUL
+    // the class forbids — the decoded-value check rejects it.
+    register(trie, 'GET', '/seg/:s([a-z%0-9]+)')
+    const result = trie.find('GET', '/seg/abc%00def')
+    expect(isHit(result)).toBe(false)
   })
 })
 

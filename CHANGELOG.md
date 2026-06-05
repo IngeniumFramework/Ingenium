@@ -78,6 +78,27 @@ deferred items and likely-to-shift surfaces.
   before the 404/405 surfaces. Previously a request to an unregistered
   path 404'd before any middleware fired.
 
+## [0.0.4] - 2026-06-05
+
+Security release — two highs and several mediums from a multi-agent audit, plus
+follow-up hardening. All findings were adversarially verified before fixing.
+
+### Security — Fixed
+
+- **Route param constraints are now tested against the DECODED value** (`router/trie.ts`). Previously the constraint ran against the raw percent-encoded segment while the handler received the decoded value, so `%2f`/`%2e`/`%00` smuggled `/`, `.`, or NUL past a constraint written as a filter (e.g. `:file([^/]+)` used as a traversal guard). **(High)**
+- **Timed-out request contexts are poisoned and dropped from the pool** instead of being reused (`context/pool.ts`, `app.ts`, `IngeniumContext._timedOut`). The orphan-write guard only covered the body writers; an orphaned handler's `ctx.set()`/`ctx.status()` could land on the next request's recycled context (cross-request header/status bleed). Poisoned contexts are now never rebound. **(High)**
+- **JWKS SSRF guard normalizes IPv4-mapped IPv6** (`jwt/jwks.ts`). `::ffff:127.0.0.1` / `::ffff:169.254.169.254` / `::ffff:10.0.0.5` (and the hex forms `new URL()` canonicalizes to) are collapsed to their embedded IPv4 and blocked. Also blocks `0.0.0.0/8`, and adds DNS resolve-and-check so a hostname that resolves into private/loopback/link-local space is rejected. **(Medium)**
+- **Sessions are no longer persisted until written to** (`session/middleware.ts`). New `SessionOptions.saveUninitialized` (default `false`) — empty anonymous sessions are no longer stored/cookied by default, closing a cookieless-flood memory-DoS against the in-memory store. The session `MemoryStore` is now bounded (`maxEntries`, default 100k, LRU eviction). **(Medium)**
+- **Default error boundary no longer leaks raw exception messages in production** (`app.ts`). A thrown non-`IngeniumError` now serializes a generic `Internal Server Error` in production (raw message only when `NODE_ENV !== 'production'`), matching the RFC 7807 serializer. `IngeniumError` messages remain surfaced. **(Medium)**
+- **SSE framing fields are sanitized** (`sse/sse.ts`). CR/LF is stripped from `event`/`id`/comment values and `data` is CRLF-normalized, preventing SSE field/event injection (response-splitting analog). Non-finite `retry` is ignored. **(Medium)**
+- **The WebSocket adapter now enforces `maxRequestBytes`** (`ws/ws-node-adapter.ts`). Enabling WebSockets previously dropped the transport-level body cap, leaving `ctx.body.stream()` consumers uncapped. Body-size enforcement is extracted to `transport/body-limit.ts` and shared by both Node adapters so they can't drift. **(Medium)**
+- **Static serving resolves symlinks** (`static/middleware.ts`). New `StaticOptions.symlinks` (default `'deny'`) realpath-resolves the final target and 403s if it escapes the root, closing the in-root-symlink-points-out escape. Set `'allow'` to opt out.
+- **Rate limiter warns when defaulting to the in-process store** (dev-only), and `MultipartFile.filename` is documented as untrusted (traversal vector for naive disk writes).
+
+### Added
+
+- `StaticOptions.symlinks`, `SessionOptions.saveUninitialized`, session `MemoryStore` `maxEntries`.
+
 ## [0.1.0-alpha] - 2026-05-12
 
 First publishable alpha. Locks the core surface described in `API.md` and adds

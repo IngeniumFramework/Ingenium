@@ -111,42 +111,37 @@ describe('requestTimeoutMs: onError can intercept the timeout', () => {
 // ───────────────────────────────────────────────────────────────────────────
 
 describe('requestTimeoutMs: late writes from orphaned handler do NOT corrupt next request', () => {
-  it('orphan ctx.json() after timeout is swallowed; subsequent request returns its own correct body', async () => {
-    // We need the SAME ctx to be reused for both requests — that's the
-    // exact failure mode we're protecting against. Drive that by acquiring
-    // from a 1-slot pool that always pops the same instance.
+  it('a timed-out context is poisoned and NOT reused; orphan header/body writes hit the discarded ctx only', async () => {
+    // The robust guarantee: a context whose dispatch timed out is dropped by
+    // the pool instead of being recycled, so the orphan can write whatever it
+    // likes (including UN-guarded ctx.set/ctx.status) and it can never land on
+    // a subsequent request — that request runs on a DIFFERENT context.
     const app = new IngeniumApp({ poolSize: 1, requestTimeoutMs: 25 })
 
-    // Capture the orphan's "release" promise so the test can await it,
-    // then assert that the second request's body is unchanged afterward.
     let orphanRelease: ((value: unknown) => void) | null = null
     const orphanPromise = new Promise<unknown>((resolve) => {
       orphanRelease = resolve
     })
 
     app.get('/slow', async (ctx) => {
-      // Wait until the test releases us — well after the timeout has fired
-      // and the second request has already written its own response.
       await orphanPromise
-      // This call MUST be detected as a stale orphan and swallowed.
+      // Header write is NOT epoch-guarded — pre-fix this could bleed onto the
+      // next request. It must now hit the discarded ctx only.
+      ctx.set('x-orphan-leak', 'from-orphan')
+      // Body write IS epoch-guarded — must be swallowed (and warn).
       ctx.json({ orphan: 'leaked' }, 599)
     })
     app.get('/fast', (ctx) => ctx.json({ second: true }, 201))
 
-    // Capture the warning from the swallow path so we can assert it fired.
     const warnings: string[] = []
     const warnHandler = (warn: Error & { name?: string }): void => {
       if (warn.name === 'IngeniumLateWriteWarning') warnings.push(warn.message)
     }
     process.on('warning', warnHandler)
 
-    // Reach the private pool — testing the exact recycle path is the whole
-    // point of this test, so an unsafe cast is justified.
     const pool = (app as unknown as { pool: { acquire(): IngeniumContext; release(c: IngeniumContext): void } }).pool
 
     try {
-      // Manually drive both requests through the SAME ctx, releasing
-      // between them so the pool reuses it.
       const ctx1 = pool.acquire()
       ctx1.method = 'GET'
       ctx1.url = '/slow'
@@ -154,35 +149,30 @@ describe('requestTimeoutMs: late writes from orphaned handler do NOT corrupt nex
       ctx1.rawQuery = ''
       await app.handle(ctx1)
       expect(ctx1._statusCode).toBe(503)
+      expect(ctx1._timedOut).toBe(true)
       pool.release(ctx1)
 
       const ctx2 = pool.acquire()
-      // Same instance (1-slot pool).
-      expect(ctx2).toBe(ctx1)
+      // Poisoned context must NOT be recycled — a fresh instance is allocated.
+      expect(ctx2).not.toBe(ctx1)
       ctx2.method = 'GET'
       ctx2.url = '/fast'
       ctx2.path = '/fast'
       ctx2.rawQuery = ''
       await app.handle(ctx2)
       expect(ctx2._statusCode).toBe(201)
-      const body2Before = (ctx2._body as { kind: 'string'; data: string }).data
-      expect(JSON.parse(body2Before)).toEqual({ second: true })
+      expect(JSON.parse((ctx2._body as { kind: 'string'; data: string }).data)).toEqual({ second: true })
 
-      // NOW release the orphan. Its ctx.json call should be swallowed by
-      // the still-installed late-write guard. Wait a tick for the orphan
-      // continuation to run.
-      // TS narrows the let-bound closure capture to `never` here despite the
-      // assignment in the Promise constructor; explicit guard avoids the warn.
+      // Release the orphan; let its continuation run.
       if (orphanRelease) (orphanRelease as (v: unknown) => void)(undefined)
       await new Promise((r) => setTimeout(r, 10))
 
-      // The second request's response must be unchanged — orphan write
-      // discarded.
-      const body2After = (ctx2._body as { kind: 'string'; data: string }).data
-      expect(body2After).toBe(body2Before)
+      // The next request's context is untouched by the orphan — header AND body.
       expect(ctx2._statusCode).toBe(201)
+      expect(JSON.parse((ctx2._body as { kind: 'string'; data: string }).data)).toEqual({ second: true })
+      expect(ctx2.getHeader('x-orphan-leak')).toBeUndefined()
 
-      // And we should have observed at least one late-write warning.
+      // The guarded body write still gets swallowed with a warning.
       expect(warnings.length).toBeGreaterThanOrEqual(1)
       expect(warnings[0]).toMatch(/Late response write after timeout/)
     } finally {

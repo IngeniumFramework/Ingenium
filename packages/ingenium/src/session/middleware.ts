@@ -273,6 +273,7 @@ export function sessionMiddleware(opts: SessionOptions): IngeniumMiddleware {
   const cookieName = opts.cookieName ?? DEFAULT_COOKIE_NAME
   const maxAgeSeconds = opts.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS
   const rolling = opts.rolling ?? false
+  const saveUninitialized = opts.saveUninitialized ?? false
   const baseCookieOpts: SessionCookieOptions = opts.cookie ?? {}
   const store: SessionStore = opts.store ?? new MemoryStore()
 
@@ -346,7 +347,7 @@ export function sessionMiddleware(opts: SessionOptions): IngeniumMiddleware {
     try {
       await next()
     } finally {
-      await commit(ctx, session, secrets[0]!, cookieName, maxAgeSeconds, rolling, cookieOpts, store)
+      await commit(ctx, session, secrets[0]!, cookieName, maxAgeSeconds, rolling, cookieOpts, store, saveUninitialized)
     }
   }
 }
@@ -364,6 +365,7 @@ async function commit(
   rolling: boolean,
   cookieOpts: SessionCookieOptions,
   store: SessionStore,
+  saveUninitialized: boolean,
 ): Promise<void> {
   if (session.destroyed) {
     // Clear cookie. Max-Age=0 is the cross-browser way to expire immediately.
@@ -374,10 +376,13 @@ async function commit(
     return
   }
 
-  // Spec: persist + cookie when session is dirty OR new. Persisting empty
-  // new sessions is intentional — it lets handlers rely on a stable id
-  // across requests for anon flows (CSRF tokens, A/B buckets, etc.).
-  const shouldPersist = session.dirty || session.isNew
+  // Persist + cookie when the session was written to (dirty), or when it's new
+  // AND the app opted into `saveUninitialized`. Persisting EMPTY new sessions by
+  // default is a memory-DoS vector: an unauthenticated cookieless request flood
+  // would create one full-TTL store entry per request. Defaulting off means anon
+  // sessions are persisted lazily on first write; set `saveUninitialized: true`
+  // to restore stable-anon-id behavior (CSRF tokens, A/B buckets).
+  const shouldPersist = session.dirty || (session.isNew && saveUninitialized)
 
   if (shouldPersist) {
     await store.set(session.id, session.snapshot(), maxAgeSeconds)

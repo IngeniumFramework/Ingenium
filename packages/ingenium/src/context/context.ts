@@ -429,6 +429,17 @@ export class IngeniumContext<Params = Record<string, string>> {
    */
   _dispatchEpoch = 0
 
+  /**
+   * @internal Set `true` by the timeout path when a dispatch exceeds
+   * `requestTimeoutMs`. The orphaned handler keeps running and may still write
+   * to `this` AFTER the boundary responded. The epoch guard swallows late
+   * *body* writes, but `ctx.set`/`ctx.status`/direct `_headers` writes are not
+   * guarded — so the pool DISCARDS a context with this flag set instead of
+   * reusing it (see `IngeniumContextPool.release`), guaranteeing the orphan's
+   * late header/status writes can never land on a subsequent request's context.
+   */
+  _timedOut = false
+
   // ───── Response helpers ────────────────────────────────────────────────
 
   /**
@@ -668,6 +679,7 @@ export class IngeniumContext<Params = Record<string, string>> {
     this._body = { kind: 'none' }
     this._written = false
     this._dispatchEpoch = 0
+    this._timedOut = false
     this._epoch++
     this.body._reset()
   }

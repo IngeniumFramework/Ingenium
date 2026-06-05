@@ -3,6 +3,17 @@ import type { IngeniumMiddleware } from '../middleware/types.ts'
 import { MemoryStore } from './store.ts'
 import type { RateLimitOptions } from './types.ts'
 
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
+/**
+ * Warn once per process when a limiter falls back to the in-process store.
+ * The default `MemoryStore` keeps counters per-process: behind a load balancer
+ * each replica enforces its own window, so the effective limit is `max ×
+ * replicas` and bursts fragment across pods. We nudge rather than change the
+ * default so single-replica apps and tests keep zero-config behavior.
+ */
+let warnedDefaultStore = false
+
 /**
  * Default key generator — buckets by client IP.
  *
@@ -42,6 +53,18 @@ export function rateLimit(opts: RateLimitOptions = {}): IngeniumMiddleware {
 
   if (windowMs <= 0) throw new Error('rateLimit: windowMs must be > 0')
   if (max <= 0) throw new Error('rateLimit: max must be > 0')
+
+  if (IS_DEV && opts.store === undefined && !warnedDefaultStore) {
+    warnedDefaultStore = true
+    try {
+      process.emitWarning(
+        'rateLimit() is using the in-process MemoryStore: counters are per-process, so behind multiple replicas each instance keeps its own window (effective limit ≈ max × replicas) and bursts fragment across pods. For multi-instance deployments pass a shared store (e.g. the Redis store from the ingenium-redis package).',
+        { type: 'IngeniumRateLimitMemoryStoreWarning' },
+      )
+    } catch {
+      // process.emitWarning can throw in unusual runtimes (workers); swallow.
+    }
+  }
 
   return async (ctx, next) => {
     if (skip && skip(ctx)) {
