@@ -86,11 +86,23 @@ export interface IngeniumCookies {
 // ───── Parser (RFC 6265 §5.2, defensive) ────────────────────────────────────
 
 /**
+ * Hard cap on the number of distinct cookies retained from a single `Cookie`
+ * header. A `Cookie: a=1; b=2; ...` header with thousands of pairs would
+ * otherwise force unbounded object growth on every request. Browsers silently
+ * cap per-domain cookie counts well below this, so legitimate traffic is never
+ * affected. We BREAK rather than throw: this parser is on the dispatch hot path
+ * and must never crash on attacker input (see the function JSDoc).
+ */
+const MAX_COOKIES = 150
+
+/**
  * Parse a `Cookie` request header into a name → value map. Mirrors the
  * `parseCookieHeader` helper in `session/middleware.ts` but kept inline here
  * so the cookie holder has no cross-module dependency on the session module.
  *
  * - First occurrence wins (RFC 6265 §5.4 typical browser behavior).
+ * - At most {@link MAX_COOKIES} distinct cookies are retained; extras are
+ *   silently dropped (DoS guard — never throws).
  * - Quoted values: surrounding `"` are stripped.
  * - Percent-encoded values are decoded via `decodeURIComponent`; bad encodings
  *   fall back to the raw value rather than throwing — this parser is exposed
@@ -100,8 +112,10 @@ function parseCookieHeader(header: string | undefined): Record<string, string> {
   const out: Record<string, string> = Object.create(null) as Record<string, string>
   if (!header) return out
 
+  let stored = 0
   const parts = header.split(';')
   for (let i = 0; i < parts.length; i++) {
+    if (stored >= MAX_COOKIES) break
     const part = parts[i]!
     const eq = part.indexOf('=')
     if (eq < 0) continue
@@ -120,6 +134,7 @@ function parseCookieHeader(header: string | undefined): Record<string, string> {
     } catch {
       out[name] = value
     }
+    stored++
   }
   return out
 }

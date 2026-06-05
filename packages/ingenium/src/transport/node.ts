@@ -123,7 +123,13 @@ function rejectIfContentLengthTooBig(
   const raw = req.headers['content-length']
   if (typeof raw !== 'string' || raw.length === 0) return false
   const n = Number(raw)
-  if (!Number.isFinite(n)) return false
+  // Reject only on a well-formed, non-negative integer over the cap. A
+  // negative, fractional, NaN, or > 2^53 Content-Length is malformed: it must
+  // NOT slip past as "valid and in-range" (which would then feed a bogus value
+  // into downstream buffer pre-sizing in populateContext). Treat it as
+  // missing/invalid → false here, letting the byte-limit Transform enforce the
+  // real cap on the actual bytes received.
+  if (!Number.isSafeInteger(n) || n < 0) return false
   if (n <= maxRequestBytes) return false
 
   res.statusCode = 413
@@ -160,7 +166,13 @@ function populateContext(ctx: IngeniumContext, req: IncomingMessage, maxRequestB
 
   // Wire body lazily — the source stream is only consumed if a body method is called.
   const cl = req.headers['content-length']
-  const contentLength = cl ? Number(cl) : undefined
+  // Only treat a well-formed, non-negative integer as a known length. A
+  // negative/fractional/NaN/unsafe value must NOT flow into the byte-cap
+  // `knownSafe` short-circuit (it could declare a tiny length and bypass the
+  // Transform) nor into `_attach`'s pre-sizing hint below.
+  const parsedCl = cl ? Number(cl) : undefined
+  const contentLength =
+    parsedCl !== undefined && Number.isSafeInteger(parsedCl) && parsedCl >= 0 ? parsedCl : undefined
   const ct = req.headers['content-type']
   // Wrap the raw IncomingMessage in a transport-level byte-limit so the cap
   // applies to EVERY consumer, including `ctx.body.stream()`. We skip the

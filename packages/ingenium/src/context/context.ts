@@ -16,6 +16,7 @@ import { formatResponse, type FormatHandlers } from '../negotiation/format.ts'
 import { isFresh } from '../negotiation/fresh.ts'
 import { respondJsonWithEtag, type JsonEtagOptions } from '../negotiation/json-etag.ts'
 import {
+  IngeniumBadRequestError,
   IngeniumHaltError,
   IngeniumHeaderInjectionError,
   IngeniumUnserializableError,
@@ -161,16 +162,39 @@ function queryPathToField(path: StandardIssue['path']): string {
 }
 
 /**
+ * Hard cap on the number of query parameters materialized by `parse()`. An
+ * attacker can send `?a=1&a=2&...` thousands of times to force unbounded
+ * allocation (and, with array-promotion, unbounded array growth) in a single
+ * request. Browsers and proxies never legitimately emit anywhere near this many
+ * params, so the cap is a DoS guard, not a usability constraint.
+ *
+ * This is checked ONLY inside `toShallowArrayObject`, which runs lazily on
+ * `ctx.query.parse(...)` — plain `ctx.query.get(...)` reads never touch it, so
+ * the dispatch hot path pays nothing.
+ */
+const MAX_QUERY_PARAMS = 1000
+
+/**
  * Build the `{ key: string | string[] }` input that gets fed to the schema.
  * Walks the URLSearchParams once; collisions promote a scalar to an array.
  *
  * Allocated lazily on `parse()` only — never paid by handlers that just read
  * `ctx.query.get(...)`. Iteration of URLSearchParams is iteration-order stable
  * and yields decoded values, so no manual percent-decoding here.
+ *
+ * Throws {@link IngeniumBadRequestError} once more than {@link MAX_QUERY_PARAMS}
+ * params have been iterated — the count is incremented inside the existing walk,
+ * so the bound adds no extra pass.
  */
 function toShallowArrayObject(usp: URLSearchParams): Record<string, string | string[]> {
   const out: Record<string, string | string[]> = Object.create(null)
+  let count = 0
   for (const [k, v] of usp) {
+    if (++count > MAX_QUERY_PARAMS) {
+      throw new IngeniumBadRequestError(
+        `Too many query parameters (limit ${MAX_QUERY_PARAMS})`,
+      )
+    }
     const existing = out[k]
     if (existing === undefined) {
       out[k] = v

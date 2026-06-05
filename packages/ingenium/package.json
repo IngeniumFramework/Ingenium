@@ -1,6 +1,6 @@
 {
   "name": "ingenium",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Express DX, Hono/Fastify throughput. A Node.js HTTP framework.",
   "type": "module",
   "main": "./dist/index.cjs",

@@ -136,7 +136,10 @@ export function createWebSocketRegistrar(): WsRegistrar {
         if (!wss) {
           wss = new wsModule.WebSocketServer({
             noServer: true,
-            maxPayload: route.options.maxPayload,
+            // `ws` defaults maxPayload to 100 MiB/frame when undefined — a
+            // single hostile peer can pin that much memory per message. Cap at
+            // a conservative 1 MiB unless the route explicitly opts into more.
+            maxPayload: route.options.maxPayload ?? 1024 * 1024,
             perMessageDeflate: route.options.perMessageDeflate ?? false,
           })
           wssByPath.set(route.path, wss)

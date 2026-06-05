@@ -10,6 +10,15 @@ import {
   type StandardSchemaV1,
 } from '../schema/standard.ts'
 
+/**
+ * Hard cap on the number of fields materialized by `urlencoded()`. A body like
+ * `a=1&a=2&...` repeated thousands of times forces unbounded object growth in a
+ * single request. `multipart()` already caps its field/file counts; this closes
+ * the parity gap for the urlencoded parser. The cap runs inside the existing
+ * walk (no extra pass) and only on the lazy `urlencoded()` path.
+ */
+const MAX_URLENCODED_FIELDS = 1000
+
 /** Minimal duck-type for any validation library that accepts unknown and returns a typed value. */
 export interface ParseSchema<T> {
   parse(input: unknown): T
@@ -270,12 +279,26 @@ export class IngeniumBody {
     return parsed as T
   }
 
-  /** Parses the body as `application/x-www-form-urlencoded`. */
-  async urlencoded(maxBytes?: number): Promise<Record<string, string>> {
+  /**
+   * Parses the body as `application/x-www-form-urlencoded`.
+   *
+   * Rejects with {@link IngeniumBadRequestError} when the body carries more
+   * than `maxFields` distinct field entries (default
+   * {@link MAX_URLENCODED_FIELDS}). Without this cap an attacker could send an
+   * arbitrarily long `a=1&b=2&...` body to force unbounded object growth — the
+   * multipart parser already enforces an equivalent field cap.
+   */
+  async urlencoded(maxBytes?: number, maxFields: number = MAX_URLENCODED_FIELDS): Promise<Record<string, string>> {
     const text = await this.text(maxBytes)
     const params = new URLSearchParams(text)
     const out: Record<string, string> = {}
-    for (const [k, v] of params) out[k] = v
+    let count = 0
+    for (const [k, v] of params) {
+      if (++count > maxFields) {
+        throw new IngeniumBadRequestError(`Too many form fields (limit ${maxFields})`)
+      }
+      out[k] = v
+    }
     return out
   }
 

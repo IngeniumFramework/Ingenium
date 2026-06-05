@@ -2,7 +2,7 @@
 
 Ingenium is intentionally minimal at the network edge: it does not terminate TLS, run as a process supervisor, or ship its own observability layer. The job of the surrounding stack is to handle those things, and the framework is designed to slot in cleanly behind a reverse proxy.
 
-This guide covers the patterns we recommend for production. Examples assume `ingenium` v0.1.0-alpha and Node 22+.
+This guide covers the patterns we recommend for production. Examples assume `ingenium` v0.1.0-alpha. Ingenium requires Node.js 20+; Node 24 LTS is recommended (see `.nvmrc`). The published packages are built targeting node20 syntax, so they run on Node 20 through 24.
 
 ---
 

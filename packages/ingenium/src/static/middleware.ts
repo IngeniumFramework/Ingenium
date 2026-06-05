@@ -224,6 +224,13 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
     ctx.set('last-modified', lastModified)
     ctx.set('cache-control', cacheControl)
     ctx.set('content-type', mimeFor(target))
+    // Static roots commonly serve user-controlled uploads. Without an explicit
+    // nosniff, a browser may MIME-sniff e.g. a .txt/.jpg upload as HTML and
+    // execute embedded markup → stored XSS. Pin the declared content-type.
+    // Only set if a handler/middleware upstream hasn't already chosen a value.
+    if (ctx._headers['x-content-type-options'] === undefined) {
+      ctx.set('x-content-type-options', 'nosniff')
+    }
     ctx.set('accept-ranges', 'bytes')
 
     // Conditional GET via If-None-Match (preferred) or If-Modified-Since

@@ -26,6 +26,19 @@ export class TrieNode {
   handlers: Partial<Record<HttpMethod, ComposedHandler>> = {}
 
   /**
+   * Lazily-cached `Object.keys(handlers)` — the set of methods registered at
+   * this leaf. `null` until first read, then memoized. Safe to cache because
+   * `handlers` is only written at compose time and a recompose builds a brand-
+   * new trie (nodes are never reused across composes), so the method set is
+   * immutable for this node's lifetime. Hoisting it off the per-request hot
+   * path matters: `find()` previously called `Object.keys(handlers)` on EVERY
+   * successful match to populate `MatchResult.allowed` — a fresh string-array
+   * allocation per request for data the dispatcher never reads on a hit.
+   * Initialized as a class field so the constructor stamps the hidden class.
+   */
+  allowedMethods: readonly HttpMethod[] | null = null
+
+  /**
    * Param names accumulated from root → this node, in order. Cached so
    * matching can fill the params object in O(k) without re-walking parents.
    */
@@ -215,7 +228,7 @@ export class RouterTrie {
 
     const handler = node.handlers[method]
     if (!handler) {
-      const allowed = Object.keys(node.handlers) as HttpMethod[]
+      const allowed = node.allowedMethods ?? (node.allowedMethods = Object.keys(node.handlers) as HttpMethod[])
       if (allowed.length === 0) return { kind: 'not-found' }
       return { kind: 'method-not-allowed', allowed }
     }
@@ -236,7 +249,7 @@ export class RouterTrie {
     return {
       handler,
       params,
-      allowed: Object.keys(node.handlers) as HttpMethod[],
+      allowed: node.allowedMethods ?? (node.allowedMethods = Object.keys(node.handlers) as HttpMethod[]),
     }
   }
 }

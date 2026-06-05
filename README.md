@@ -177,7 +177,7 @@ npm install -g ingenium-cli
 ingenium new my-api
 ```
 
-**Requirements:** Node 20+. Bun 1.1+ for the Bun adapter. WebSocket support requires installing `ws` as a peer dep.
+**Requirements:** Node.js 20+. Node 24 LTS is recommended (see `.nvmrc`). Bun 1.1+ for the Bun adapter. WebSocket support requires installing `ws` as a peer dep.
 
 ---
 

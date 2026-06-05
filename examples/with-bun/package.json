@@ -1,6 +1,6 @@
 {
   "name": "ingenium-example-bun",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
   "description": "Minimal Ingenium server running on Bun.serve() via the BunAdapter transport.",

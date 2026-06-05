@@ -1,6 +1,6 @@
 {
   "name": "ingenium-redis",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Redis-backed session, idempotency, rate-limit, and background-job queue stores for Ingenium. Drop-in replacements for the in-memory defaults; required for multi-instance deployments.",
   "type": "module",
   "main": "./dist/index.cjs",

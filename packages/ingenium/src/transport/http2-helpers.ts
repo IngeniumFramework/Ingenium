@@ -64,7 +64,13 @@ export function populateFromH2(
   ctx.headers = userHeaders as IncomingHttpHeaders
 
   const cl = userHeaders['content-length']
-  const contentLength = typeof cl === 'string' ? Number(cl) : undefined
+  // Only treat a well-formed, non-negative integer as a known length. A
+  // negative/fractional/NaN/unsafe value must NOT flow into the `knownSafe`
+  // byte-cap short-circuit or into `_attach`'s pre-sizing hint — both would be
+  // corrupted by a bogus declared length.
+  const parsedCl = typeof cl === 'string' ? Number(cl) : undefined
+  const contentLength =
+    parsedCl !== undefined && Number.isSafeInteger(parsedCl) && parsedCl >= 0 ? parsedCl : undefined
   const ct = typeof userHeaders['content-type'] === 'string' ? (userHeaders['content-type'] as string) : undefined
 
   // The `ServerHttp2Stream` IS a Duplex with a Readable side — wrap it in the
@@ -156,7 +162,12 @@ export function rejectH2IfContentLengthTooBig(
   const cl = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw[0] : undefined
   if (typeof cl !== 'string' || cl.length === 0) return false
   const n = Number(cl)
-  if (!Number.isFinite(n)) return false
+  // Reject only on a well-formed, non-negative integer over the cap. A
+  // negative/fractional/NaN/unsafe Content-Length is malformed and must not be
+  // accepted as "valid and in-range" (which would let a bogus length reach the
+  // body-sizing path) — treat it as missing here and let the byte-limit
+  // Transform police the actual bytes.
+  if (!Number.isSafeInteger(n) || n < 0) return false
   if (n <= maxRequestBytes) return false
 
   if (stream.destroyed || stream.closed) return true

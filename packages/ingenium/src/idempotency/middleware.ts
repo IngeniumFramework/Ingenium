@@ -2,6 +2,7 @@ import { Buffer } from 'node:buffer'
 import type { IngeniumContext, ResponseBody } from '../context/context.ts'
 import type { IngeniumMiddleware } from '../middleware/types.ts'
 import type { HttpMethod } from '../router/types.ts'
+import { IngeniumBadRequestError } from '../errors.ts'
 import { IdempotencyMemoryStore } from './store.ts'
 import type {
   CachedResponse,
@@ -16,6 +17,14 @@ import type {
 const IS_DEV = process.env.NODE_ENV !== 'production'
 
 const DEFAULT_METHODS: readonly HttpMethod[] = ['POST', 'PATCH', 'DELETE']
+
+/**
+ * Upper bound on the `Idempotency-Key` header length. The key is embedded
+ * verbatim in the cache key and retained in the store for the full TTL, so an
+ * unbounded value lets a client cache arbitrarily large keys → memory DoS.
+ * Stripe-style keys are short (≤ 64 chars in practice); 256 is generous.
+ */
+const MAX_IDEMPOTENCY_KEY_LENGTH = 256
 
 /**
  * Default cacheable predicate: cache 2xx/3xx/4xx, NOT 5xx. Stripe
@@ -195,6 +204,15 @@ export function idempotencyMiddleware(opts: IdempotencyOptions = {}): IngeniumMi
     const headerValue = readHeader(ctx, resolved.header)
     if (!headerValue || headerValue.length === 0) {
       return next()
+    }
+
+    // Reject an over-long key BEFORE it reaches the cache key / store. An
+    // unbounded Idempotency-Key would be retained verbatim for the whole TTL,
+    // turning a single header into a memory-DoS lever.
+    if (headerValue.length > MAX_IDEMPOTENCY_KEY_LENGTH) {
+      throw new IngeniumBadRequestError(
+        `Idempotency-Key exceeds the maximum length of ${MAX_IDEMPOTENCY_KEY_LENGTH} characters`,
+      )
     }
 
     const scope = scopeFn(ctx)

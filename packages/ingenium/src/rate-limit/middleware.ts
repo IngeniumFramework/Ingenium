@@ -3,17 +3,22 @@ import type { IngeniumMiddleware } from '../middleware/types.ts'
 import { MemoryStore } from './store.ts'
 import type { RateLimitOptions } from './types.ts'
 
-/** Default key generator — see RateLimitOptions.keyGenerator JSDoc. */
+/**
+ * Default key generator — buckets by client IP.
+ *
+ * WHY `ctx.ip` and not the raw `x-forwarded-for` / `x-real-ip` headers:
+ * those headers are entirely client-controlled. A client can forge an
+ * arbitrary `X-Forwarded-For` to (a) evade the limit by rotating a fake
+ * first hop on every request, or (b) frame a victim by pinning their real
+ * IP into the throttle bucket. `ctx.ip` respects the app's configured trust
+ * boundary — it only walks the XFF chain when `trustProxy` is set (i.e. when
+ * the operator has asserted an upstream proxy it controls), and otherwise
+ * returns the immediate socket peer. Trusting the header directly would make
+ * the limiter trivially bypassable on any internet-facing deployment.
+ */
 function defaultKeyGenerator(ctx: IngeniumContext): string {
-  const xff = ctx.headers['x-forwarded-for']
-  if (typeof xff === 'string' && xff.length > 0) {
-    const first = xff.split(',')[0]
-    const trimmed = first?.trim()
-    if (trimmed && trimmed.length > 0) return trimmed
-  }
-  const xri = ctx.headers['x-real-ip']
-  if (typeof xri === 'string' && xri.length > 0) return xri
-  return 'unknown'
+  const ip = ctx.ip
+  return ip && ip.length > 0 ? ip : 'unknown'
 }
 
 /**

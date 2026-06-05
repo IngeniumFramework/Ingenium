@@ -135,4 +135,30 @@ describe('RouterTrie', () => {
       }
     }
   })
+
+  it('caches the leaf `allowed` array across repeated hits (perf invariant)', () => {
+    // find() memoizes Object.keys(handlers) on the node so the per-request hot
+    // path doesn't reallocate the method list on every match. Two finds against
+    // the same leaf must return the SAME array reference, and its contents must
+    // still reflect every registered method.
+    const trie = new RouterTrie()
+    register(trie, 'GET', '/cached')
+    register(trie, 'POST', '/cached')
+
+    const first = trie.find('GET', '/cached')
+    const second = trie.find('POST', '/cached')
+    expect(isHit(first) && isHit(second)).toBe(true)
+    if (isHit(first) && isHit(second)) {
+      expect([...first.allowed].sort()).toEqual(['GET', 'POST'])
+      // Same memoized reference reused — no fresh allocation on the second hit.
+      expect(first.allowed).toBe(second.allowed)
+    }
+
+    // The 405 miss path reads the same cached list.
+    const miss = trie.find('DELETE', '/cached')
+    if (!isHit(miss) && miss.kind === 'method-not-allowed') {
+      expect([...miss.allowed].sort()).toEqual(['GET', 'POST'])
+      expect(miss.allowed).toBe(isHit(first) ? first.allowed : miss.allowed)
+    }
+  })
 })

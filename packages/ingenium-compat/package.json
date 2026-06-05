@@ -1,6 +1,6 @@
 {
   "name": "ingenium-compat",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Express middleware compatibility shim for Ingenium.",
   "type": "module",
   "main": "./dist/index.cjs",

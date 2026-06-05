@@ -4,12 +4,20 @@ import { rateLimit } from '../src/rate-limit/middleware.ts'
 import { MemoryStore } from '../src/rate-limit/store.ts'
 import type { HttpMethod } from '../src/router/types.ts'
 
-function makeCtx(headers: Record<string, string> = {}): IngeniumContext {
+// The default keyGenerator buckets by `ctx.ip` (the trust-proxy-aware peer),
+// NOT by raw X-Forwarded-For / X-Real-IP — those are client-spoofable. With
+// trustProxy off (the default here), distinct clients are distinct socket
+// peers, so tests set `remoteAddress` to separate buckets.
+function makeCtx(
+  headers: Record<string, string> = {},
+  remoteAddress = '127.0.0.1',
+): IngeniumContext {
   const ctx = new IngeniumContext()
   ctx.method = 'GET' as HttpMethod
   ctx.path = '/'
   ctx.url = '/'
   ctx.headers = headers
+  ctx.remoteAddress = remoteAddress
   return ctx
 }
 
@@ -94,18 +102,18 @@ describe('rateLimit — basic accounting', () => {
     const store = new MemoryStore()
     const mw = rateLimit({ max: 1, windowMs: 1000, store })
 
-    const a1 = makeCtx({ 'x-forwarded-for': 'a' })
+    const a1 = makeCtx({}, '10.0.0.1')
     const a1Next = vi.fn(noop)
     await mw(a1, a1Next)
     expect(a1Next).toHaveBeenCalled()
 
-    const b1 = makeCtx({ 'x-forwarded-for': 'b' })
+    const b1 = makeCtx({}, '10.0.0.2')
     const b1Next = vi.fn(noop)
     await mw(b1, b1Next)
     expect(b1Next).toHaveBeenCalled() // b not throttled by a's hit
 
     // a's second request should be blocked
-    const a2 = makeCtx({ 'x-forwarded-for': 'a' })
+    const a2 = makeCtx({}, '10.0.0.1')
     const a2Next = vi.fn(noop)
     await mw(a2, a2Next)
     expect(a2Next).not.toHaveBeenCalled()
@@ -155,53 +163,53 @@ describe('rateLimit — options', () => {
     expect(b._statusCode).toBe(429)
   })
 
-  it('default keyGenerator: x-forwarded-for first hop wins', async () => {
+  it('default keyGenerator: ignores spoofable X-Forwarded-For (buckets by ctx.ip)', async () => {
     const store = new MemoryStore()
     const mw = rateLimit({ max: 1, windowMs: 1000, store })
 
-    const a = makeCtx({ 'x-forwarded-for': '1.1.1.1, 10.0.0.1, 10.0.0.2' })
+    // Same socket peer, attacker rotates X-Forwarded-For to try to dodge the
+    // limit. With trustProxy off, ctx.ip is the peer, so both share a bucket.
+    const a = makeCtx({ 'x-forwarded-for': '1.1.1.1' }, '203.0.113.7')
     await mw(a, vi.fn(noop))
-    // Different upstream chain but same first hop = same bucket = throttled.
-    const b = makeCtx({ 'x-forwarded-for': '1.1.1.1, 10.0.0.99' })
+    const b = makeCtx({ 'x-forwarded-for': '9.9.9.9' }, '203.0.113.7')
     const bNext = vi.fn(noop)
     await mw(b, bNext)
-    expect(bNext).not.toHaveBeenCalled()
+    expect(bNext).not.toHaveBeenCalled() // spoofed XFF did not buy a fresh bucket
+
+    // A genuinely different peer is still isolated despite reusing the XFF.
+    const c = makeCtx({ 'x-forwarded-for': '1.1.1.1' }, '203.0.113.8')
+    const cNext = vi.fn(noop)
+    await mw(c, cNext)
+    expect(cNext).toHaveBeenCalled()
   })
 
-  it('default keyGenerator: falls back to x-real-ip then to "unknown"', async () => {
+  it('default keyGenerator: collapses to "unknown" when peer is unresolved', async () => {
     const store = new MemoryStore()
     const mw = rateLimit({ max: 1, windowMs: 1000, store })
 
-    const a = makeCtx({ 'x-real-ip': 'real-1' })
-    await mw(a, vi.fn(noop))
-    const b = makeCtx({ 'x-real-ip': 'real-1' })
-    const bNext = vi.fn(noop)
-    await mw(b, bNext)
-    expect(bNext).not.toHaveBeenCalled() // same x-real-ip = throttled
-
-    // Headerless requests all collapse onto the 'unknown' bucket.
-    const u1 = makeCtx({})
+    // Empty remoteAddress (and X-Real-IP is NOT trusted) → 'unknown' bucket.
+    const u1 = makeCtx({ 'x-real-ip': 'real-1' }, '')
     await mw(u1, vi.fn(noop))
-    const u2 = makeCtx({})
+    const u2 = makeCtx({ 'x-real-ip': 'real-2' }, '')
     const u2Next = vi.fn(noop)
     await mw(u2, u2Next)
-    expect(u2Next).not.toHaveBeenCalled()
+    expect(u2Next).not.toHaveBeenCalled() // both collapse onto 'unknown'
   })
 
   it('store.reset(key) clears the counter', async () => {
     const store = new MemoryStore()
     const mw = rateLimit({ max: 1, windowMs: 60_000, store })
-    const k = { 'x-forwarded-for': 'reset-me' }
+    const peer = '198.51.100.1' // the key is ctx.ip, not a header value
 
-    await mw(makeCtx(k), vi.fn(noop))
-    const blockedCtx = makeCtx(k)
+    await mw(makeCtx({}, peer), vi.fn(noop))
+    const blockedCtx = makeCtx({}, peer)
     const blockedNext = vi.fn(noop)
     await mw(blockedCtx, blockedNext)
     expect(blockedNext).not.toHaveBeenCalled()
 
-    await store.reset('reset-me')
+    await store.reset(peer)
 
-    const recoveredCtx = makeCtx(k)
+    const recoveredCtx = makeCtx({}, peer)
     const recoveredNext = vi.fn(noop)
     await mw(recoveredCtx, recoveredNext)
     expect(recoveredNext).toHaveBeenCalledTimes(1)

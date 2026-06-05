@@ -1,6 +1,6 @@
 {
   "name": "ingenium-app-notes-api",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "private": true,
   "type": "module",
   "description": "Reference Ingenium application: a notes service with users, tags, and full-text search backed by SQLite.",
