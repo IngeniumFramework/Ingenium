@@ -21,14 +21,14 @@
   "dependencies": {
     "@hono/node-server": "1.19.14",
     "autocannon": "7.15.0",
-    "express": "4.22.2",
+    "express": "5.2.1",
     "fastify": "5.8.5",
     "hono": "4.12.18",
     "ingenium": "*",
     "tinybench": "3.1.1"
   },
   "devDependencies": {
-    "@types/express": "4.17.25",
+    "@types/express": "5.0.6",
     "tsx": "4.21.0"
   }
 }
