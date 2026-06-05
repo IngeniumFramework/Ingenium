@@ -34,6 +34,28 @@ function mimeFor(file: string): string {
   return MIME_TYPES[ext] ?? 'application/octet-stream'
 }
 
+/**
+ * Root confinement: `target` must be `absRoot` itself or a descendant of it.
+ * Factored out because it must run on the FINAL resolved target — after the
+ * `extensions` and `index` retry loops mutate `target` — not just the decoded
+ * request path. A user-configurable `index`/`extensions` value containing `..`
+ * (or any join that escapes) would otherwise slip past the up-front check.
+ */
+function isUnderRoot(absRoot: string, target: string): boolean {
+  return target === absRoot || target.startsWith(absRoot + path.sep)
+}
+
+/**
+ * True if any path segment of `target` below `absRoot` begins with a dot.
+ * Re-checked on the final target so an `index`/`extensions` value that resolves
+ * to a dotfile (e.g. `index: '.env'`) is still subject to the dotfile policy.
+ */
+function hasDotfileSegment(absRoot: string, target: string): boolean {
+  const rel = path.relative(absRoot, target)
+  if (rel.length === 0) return false
+  return rel.split(/[/\\]/).some((s) => s.length > 0 && s.startsWith('.'))
+}
+
 function makeEtag(stats: Stats): string {
   // Express-style weak etag: W/"<size>-<mtimeMs-as-hex>"
   return `W/"${stats.size.toString(16)}-${Math.floor(stats.mtimeMs).toString(16)}"`
@@ -112,19 +134,13 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
     // Path-traversal protection: resolve, then ensure it stays under root.
     const joined = path.join(absRoot, urlPath)
     const resolved = path.resolve(joined)
-    const isUnderRoot =
-      resolved === absRoot ||
-      resolved.startsWith(absRoot + path.sep)
-    if (!isUnderRoot) {
+    if (!isUnderRoot(absRoot, resolved)) {
       ctx.status(403).text('Forbidden')
       return
     }
 
     // Dotfile policy: check every segment of the path BELOW root.
-    const rel = path.relative(absRoot, resolved)
-    const segments = rel.length === 0 ? [] : rel.split(/[/\\]/)
-    const hasDot = segments.some((s) => s.length > 0 && s.startsWith('.'))
-    if (hasDot) {
+    if (hasDotfileSegment(absRoot, resolved)) {
       if (dotfiles === 'deny') {
         ctx.status(403).text('Forbidden')
         return
@@ -180,6 +196,25 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
 
     if (!stats || !stats.isFile()) {
       return next()
+    }
+
+    // Re-run confinement + dotfile policy on the FINAL target. The extensions
+    // and index retry loops above mutate `target` (appending `.ext` or joining
+    // a user-configurable index name), so the up-front checks on `resolved` are
+    // not authoritative for what we are about to stream.
+    if (!isUnderRoot(absRoot, target)) {
+      ctx.status(403).text('Forbidden')
+      return
+    }
+    if (hasDotfileSegment(absRoot, target)) {
+      if (dotfiles === 'deny') {
+        ctx.status(403).text('Forbidden')
+        return
+      }
+      if (dotfiles === 'ignore') {
+        return next()
+      }
+      // 'allow' falls through.
     }
 
     // ───── Cacheable response headers ─────

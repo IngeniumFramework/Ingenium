@@ -1,6 +1,9 @@
 import autocannon from 'autocannon'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, execFile, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { createInterface } from 'node:readline'
+import { promisify } from 'node:util'
+
+const execFileAsync = promisify(execFile)
 
 /**
  * Methodology disclaimer printed for every v2 run. Echoed in stdout (not just
@@ -54,6 +57,13 @@ interface FrameworkResult {
   framework: string
   rps: SampleStats
   latencyP99Ms: SampleStats
+  /**
+   * Resident set size of the SERVER child process, in MB, sampled at steady
+   * state (right after the last autocannon sample, before SIGTERM). This is the
+   * actual framework-under-test process — not the harness — so it is comparable
+   * across the matrix. NaN if the OS query failed (it is best-effort).
+   */
+  rssMb: number
 }
 
 /**
@@ -115,10 +125,15 @@ export async function runScenario(
         console.log(`rps=${r.rps.toFixed(0)}, p99=${r.latencyP99Ms.toFixed(2)}ms`)
       }
 
+      // Sample the SERVER child's RSS at steady state (after load, before kill).
+      const rssMb = await readChildRssMb(proc.child.pid)
+      console.log(`  server RSS: ${Number.isFinite(rssMb) ? rssMb.toFixed(1) + ' MB' : 'n/a'}`)
+
       results.push({
         framework: fw.name,
         rps: stats(rpsSamples),
         latencyP99Ms: stats(p99Samples),
+        rssMb,
       })
     } finally {
       await killServer(proc.child)
@@ -189,6 +204,29 @@ function bootServer(file: string): Promise<BootedServer> {
     // Generous boot timeout — if a server can't bind in 15s, it's broken.
     setTimeout(() => fail(new Error(`Timed out waiting for READY from ${file}`)), 15_000).unref()
   })
+}
+
+/**
+ * Read the resident set size (RSS) of the server child process via the OS.
+ *
+ * WHY shell out to `ps` instead of `process.memoryUsage()`: the server runs in
+ * its OWN child process, so the harness's `process.memoryUsage()` would report
+ * the harness's memory, not the framework-under-test's. `ps -o rss= -p <pid>`
+ * gives the child's actual RSS. This works on linux + darwin (CI is ubuntu),
+ * where `ps` reports RSS in kilobytes. Best-effort: on any failure (no `ps`,
+ * Windows, race with exit) it returns NaN and the table prints `n/a` rather
+ * than failing the run — RSS is a nice-to-have signal, not a gate.
+ */
+async function readChildRssMb(pid: number | undefined): Promise<number> {
+  if (!pid) return NaN
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'rss=', '-p', String(pid)])
+    const kb = Number.parseInt(stdout.trim(), 10)
+    if (!Number.isFinite(kb)) return NaN
+    return kb / 1024
+  } catch {
+    return NaN
+  }
 }
 
 function killServer(child: ChildProcessWithoutNullStreams): Promise<void> {
@@ -285,6 +323,7 @@ function printTable(scenario: string, results: FrameworkResult[]): void {
     'RPS median',
     'RPS p99',
     'p99 lat (ms) mean',
+    'server RSS (MB)',
   ]
   const rows: string[][] = [header]
   for (const r of results) {
@@ -295,6 +334,7 @@ function printTable(scenario: string, results: FrameworkResult[]): void {
       fmt(r.rps.median, 0),
       fmt(r.rps.p99, 0),
       fmt(r.latencyP99Ms.mean),
+      fmt(r.rssMb, 1),
     ])
   }
   const widths = header.map((_, c) => rows.reduce((m, row) => Math.max(m, row[c]!.length), 0))

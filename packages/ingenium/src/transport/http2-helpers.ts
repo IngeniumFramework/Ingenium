@@ -83,11 +83,60 @@ export function populateFromH2(
     contentLength !== undefined &&
     Number.isFinite(contentLength) &&
     contentLength <= maxRequestBytes
-  const source =
-    noBody || !Number.isFinite(maxRequestBytes) || knownSafe
-      ? stream
-      : stream.pipe(createByteLimit(maxRequestBytes))
-  ctx.body._attach(source, ct, Number.isFinite(contentLength) ? contentLength : undefined)
+  if (noBody || !Number.isFinite(maxRequestBytes) || knownSafe) {
+    ctx.body._attach(stream, ct, Number.isFinite(contentLength) ? contentLength : undefined)
+    return
+  }
+
+  // Cap unknown-length (chunked) bodies with a byte-limit Transform that
+  // becomes `ctx.body`'s source. Two failure modes have to be defended here,
+  // both rooted in `Stream.prototype.pipe` NOT forwarding `'error'` events:
+  //
+  //  1. Unhandled-error crash. When the cap trips, the Transform emits
+  //     `'error'`. The `body.stream()` consumer attaches its own listener, but
+  //     the chunked path in `IngeniumBody.buffer` re-pipes THIS Transform into
+  //     a second limiter and only listens on the DOWNSTREAM pipe — so this
+  //     Transform's `'error'` has no listener and becomes a process-killing
+  //     unhandled error (h2c has no socket-level teardown to swallow it).
+  //
+  //  2. Hung request. Because `pipe()` drops errors, that re-piped downstream
+  //     limiter never sees the overrun: it stops receiving data but never
+  //     `end`s or `error`s, so `body.buffer()`'s promise never settles and the
+  //     request hangs until the test/clien­t timeout.
+  //
+  // Fix both by (a) attaching a guard `'error'` listener so the event is always
+  // handled, and (b) forwarding the cap error to every stream this Transform
+  // was piped into, so re-piping consumers reject promptly. We deliberately do
+  // NOT touch the underlying h2 `stream` here: the 413 is produced by the body
+  // consumer's `IngeniumPayloadTooLargeError`, which the error boundary
+  // serializes and `writeH2Response` must flush on the still-open stream.
+  const limited = createByteLimit(maxRequestBytes)
+  const downstream = new Set<{ destroy(err?: Error): void; destroyed: boolean }>()
+  const origPipe = limited.pipe.bind(limited) as typeof limited.pipe
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  limited.pipe = function pipe(dest: any, ...rest: any[]) {
+    downstream.add(dest)
+    return origPipe(dest, ...rest)
+  } as typeof limited.pipe
+  limited.on('error', (err: Error) => {
+    for (const dest of downstream) {
+      if (!dest.destroyed) dest.destroy(err)
+    }
+    // Drain whatever inbound bytes the client is still sending. We stopped
+    // reading at the cap, so the raw h2 stream's readable side is left with
+    // unconsumed (and incoming) DATA frames. The response (413) flushes on the
+    // WRITABLE side, but a half-closed stream whose readable side never ends
+    // keeps the h2 SESSION's stream count > 0 — so a later graceful
+    // `client.close()` / `server.close()` hangs waiting for it. Unpipe the dead
+    // Transform and resume the raw stream to discard the rest, letting it reach
+    // `end` and the session close cleanly. `stream.on('error')` below absorbs
+    // any RST that arrives while draining.
+    stream.unpipe(limited)
+    stream.on('error', () => {})
+    stream.resume()
+  })
+  stream.pipe(limited)
+  ctx.body._attach(limited, ct, Number.isFinite(contentLength) ? contentLength : undefined)
 }
 
 /**
@@ -111,6 +160,18 @@ export function rejectH2IfContentLengthTooBig(
   if (n <= maxRequestBytes) return false
 
   if (stream.destroyed || stream.closed) return true
+
+  // A client that declared an oversized Content-Length is, by definition,
+  // about to send (or has half-sent) body frames we will never read. When we
+  // respond + end early, the peer's continued DATA — or its own Content-Length
+  // bookkeeping if it later sends fewer bytes than declared — makes node:http2
+  // emit `ERR_HTTP2_STREAM_ERROR` on this stream. With no listener that is an
+  // unhandled-error crash. Absorb it: the 413 has already been delivered (or
+  // the stream is being torn down anyway), so there is nothing left to do.
+  stream.on('error', () => {
+    /* absorb late RST/protocol error from the rejected, never-read body */
+  })
+
   try {
     stream.respond({
       [h2.HTTP2_HEADER_STATUS]: 413,

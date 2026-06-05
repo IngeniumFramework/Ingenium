@@ -35,6 +35,7 @@ import {
   RedisSessionStore,
   RedisIdempotencyStore,
   RedisRateLimitStore,
+  RedisQueueStore,
 } from 'ingenium-redis'
 
 const redis = createClient({ url: process.env.REDIS_URL })
@@ -105,6 +106,37 @@ new RedisRateLimitStore({
 Implements [`RateLimitStore`](../ingenium/src/rate-limit/types.ts). Each hit runs a single Lua script server-side that does `INCR + PEXPIRE-if-new + PTTL` atomically — no race where two replicas both think they own the first hit, no race where the counter exists without a TTL.
 
 `resetAt` is computed from `PTTL` on the server, so the value is consistent across replicas even with clock drift between them.
+
+### `RedisQueueStore`
+
+```ts
+new RedisQueueStore<TData>({
+  client: RedisClientLike,
+  prefix?: string,   // default 'ingenium:queue:'
+  // now?: () => number   // test-only clock override
+})
+```
+
+Implements [`QueueStore`](../ingenium/src/jobs/types.ts) — the persistence layer behind `app.queue(...)`. A FIFO background-job queue with delayed retries and a dead-letter list, shared across replicas so any worker on any pod can pick up any job.
+
+Pass it as the `store` option to `app.queue`:
+
+```ts
+app.queue('emails', {
+  store: new RedisQueueStore({ client: redis }),
+  retries: { attempts: 5, backoffMs: (n) => 1000 * 2 ** n },
+}, async (job) => {
+  await sendEmail(job.data)   // throw → retried per policy → DLQ when exhausted
+})
+```
+
+**Data model** (per `prefix`): a ZSET `pending` (score = ready-time ms, member = id) for FIFO + delay ordering, a HASH `jobs` (id → `{data, attempt}`), a SET `inflight` of delivered-but-unacked ids, a LIST `failed` (dead-letter), and an INCR `seq` counter for ids.
+
+**Atomicity**: every operation — including `next`, `retry`, and `fail` — runs as a single Lua `EVAL`. `next()` does `ZRANGEBYSCORE -inf <now> LIMIT 0 1` then `ZREM` + `SADD inflight` in one script, so two workers can never double-deliver a job. `retry` bumps the attempt counter in the hash and re-adds to `pending` at `now + delayMs`. The current wall clock is passed in as an argument so delayed/FIFO ordering is server-authoritative.
+
+**Delivery is at-least-once.** A job `next()`-ed by a worker that crashes before `ack`/`retry`/`fail` stays in `inflight` (not auto-redelivered — there's no visibility-timeout sweeper, matching the in-memory store). Add a reaper over the `inflight` set if you need crash recovery; the data model supports it.
+
+`size()` counts pending **including delayed** jobs (`ZCARD`), mirroring the in-memory store. `failedCount()` is `LLEN` of the dead-letter list.
 
 ### `RedisClientLike`
 

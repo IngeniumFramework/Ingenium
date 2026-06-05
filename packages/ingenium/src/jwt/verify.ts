@@ -65,6 +65,11 @@ export interface VerifyOptions {
   issuer?: string | readonly string[]
   maxAgeSeconds?: number
   clockSkewSeconds?: number
+  /**
+   * Require a finite numeric `exp`. Default `true` — a token without an
+   * expiry would otherwise verify forever (see middleware `requireExp`).
+   */
+  requireExp?: boolean
   /** Override "now" for deterministic tests. Returns seconds since epoch. */
   nowSeconds?: () => number
 }
@@ -87,6 +92,27 @@ function decodeJsonSegment<T = unknown>(segment: string): T | null {
 }
 
 /**
+ * Does this key material belong to the symmetric (HMAC) family?
+ *
+ * This is the load-bearing guard against the classic algorithm-confusion
+ * attack: a server configured for an asymmetric alg but tricked into running
+ * HMAC verifies the forgery with the PUBLIC key as the shared secret. A PEM
+ * (or any asymmetric `KeyObject`) is therefore NEVER eligible as an HMAC key.
+ * Only a raw string/Buffer secret, or a `secret`-type `KeyObject`, qualifies.
+ */
+function isSymmetricKey(key: VerifyKeyMaterial): boolean {
+  if (typeof key === 'string') return !looksLikePem(key)
+  if (Buffer.isBuffer(key)) return !looksLikePem(key.toString('latin1'))
+  // KeyObject: only the 'secret' type is HMAC-eligible; 'public'/'private' are not.
+  return (key as KeyObject).type === 'secret'
+}
+
+/** A PEM-armored blob is asymmetric key material, never an HMAC secret. */
+function looksLikePem(s: string): boolean {
+  return s.trimStart().startsWith('-----BEGIN')
+}
+
+/**
  * Constant-time HMAC verification.
  *
  * `timingSafeEqual` requires equal-length buffers — feeding mismatched lengths
@@ -94,6 +120,12 @@ function decodeJsonSegment<T = unknown>(segment: string): T | null {
  * computed signature against the supplied one only after the explicit length
  * check; both branches return `false` in O(constant) time relative to the
  * caller's view (the throw path never executes).
+ *
+ * The caller MUST have already established via {@link isSymmetricKey} that
+ * `secret` is HMAC-eligible — a public/private `KeyObject` would throw inside
+ * `export({format:'buffer'})`, and a PEM string would be silently (and
+ * dangerously) used as a shared secret. This function additionally try/catches
+ * so a mis-typed key degrades to `false` (bad_signature) rather than a 500.
  */
 function hmacVerifies(
   digest: string,
@@ -101,14 +133,18 @@ function hmacVerifies(
   signingInput: string,
   sig: Buffer,
 ): boolean {
-  // HMAC accepts string or Buffer; KeyObject would be unusual but handle it.
-  const secretInput: string | Buffer =
-    typeof secret === 'string' || Buffer.isBuffer(secret)
-      ? secret
-      : secret.export({ format: 'buffer' } as never)
-  const expected = createHmac(digest, secretInput).update(signingInput).digest()
-  if (sig.length !== expected.length) return false
-  return timingSafeEqual(sig, expected)
+  try {
+    // HMAC accepts string or Buffer; a 'secret' KeyObject exports to a buffer.
+    const secretInput: string | Buffer =
+      typeof secret === 'string' || Buffer.isBuffer(secret)
+        ? secret
+        : secret.export({ format: 'buffer' } as never)
+    const expected = createHmac(digest, secretInput).update(signingInput).digest()
+    if (sig.length !== expected.length) return false
+    return timingSafeEqual(sig, expected)
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -171,6 +207,15 @@ function asymmetricVerifies(
   } catch {
     return false
   }
+}
+
+/**
+ * A JWT temporal claim (`exp`/`nbf`/`iat`) is only meaningful as a finite
+ * number of seconds. `NaN`/`Infinity` would defeat the `<=` comparisons, so
+ * they're rejected the same as a missing claim.
+ */
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
 }
 
 /** Allowed claim resolution — both single value and array forms are common in spec. */
@@ -268,12 +313,20 @@ export function verifyJwt<T = Record<string, unknown>>(
 
   let signatureOk = false
   for (const candidate of candidates) {
+    // Bind the algorithm family to the key family. An HMAC alg must never be
+    // attempted against an asymmetric key (the algorithm-confusion / key-as-
+    // secret forgery), and an asymmetric alg must never run against a raw
+    // symmetric secret. A mismatched candidate is simply skipped — if NONE of
+    // the supplied keys are family-compatible we fall through to bad_signature.
+    const candidateIsSymmetric = isSymmetricKey(candidate)
     if (spec.family === 'hmac') {
+      if (!candidateIsSymmetric) continue
       if (hmacVerifies(spec.digest, candidate, signingInput, sig)) {
         signatureOk = true
         break
       }
     } else {
+      if (candidateIsSymmetric) continue
       if (asymmetricVerifies(spec, candidate, signingInput, sig)) {
         signatureOk = true
         break
@@ -287,14 +340,25 @@ export function verifyJwt<T = Record<string, unknown>>(
   const skew = opts.clockSkewSeconds ?? 5
   const claims = payload as Record<string, unknown>
 
-  if (typeof claims.exp === 'number') {
+  // A present-but-non-numeric temporal claim is an attempt to slip past the
+  // numeric checks below (e.g. `exp: "9999999999"` as a string). Treat any
+  // such claim as malformed rather than silently skipping the comparison.
+  if ('exp' in claims && !isFiniteNumber(claims.exp)) return { error: 'malformed' }
+  if ('nbf' in claims && !isFiniteNumber(claims.nbf)) return { error: 'malformed' }
+  if ('iat' in claims && !isFiniteNumber(claims.iat)) return { error: 'malformed' }
+
+  const requireExp = opts.requireExp ?? true
+  if (isFiniteNumber(claims.exp)) {
     if (claims.exp <= now - skew) return { error: 'expired' }
+  } else if (requireExp) {
+    // No usable expiry — refuse rather than accept a non-expiring token.
+    return { error: 'missing_exp' }
   }
-  if (typeof claims.nbf === 'number') {
+  if (isFiniteNumber(claims.nbf)) {
     if (claims.nbf > now + skew) return { error: 'not_yet_valid' }
   }
   if (typeof opts.maxAgeSeconds === 'number') {
-    if (typeof claims.iat !== 'number') return { error: 'too_old' }
+    if (!isFiniteNumber(claims.iat)) return { error: 'too_old' }
     if (claims.iat + opts.maxAgeSeconds <= now - skew) return { error: 'too_old' }
   }
   if (opts.audience !== undefined) {

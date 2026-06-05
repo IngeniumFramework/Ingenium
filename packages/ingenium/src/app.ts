@@ -1,4 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
+import { Buffer } from 'node:buffer'
+import { Readable } from 'node:stream'
 import { IngeniumContext } from './context/context.ts'
 import { IngeniumContextPool } from './context/pool.ts'
 import {
@@ -113,6 +115,55 @@ const DEFAULT_MAX_REQUEST_BYTES = 2_097_152
 export type IngeniumErrorHandler = (err: unknown, ctx: IngeniumContext) => unknown | Promise<unknown>
 
 /**
+ * Options for {@link IngeniumApp.inject} — the in-process test client. Mirrors
+ * the shape a real request would carry, minus a socket. `url` is the only
+ * required field; everything else defaults to a bare GET.
+ */
+export interface InjectRequest {
+  /** HTTP method. Defaults to `GET`. */
+  method?: HttpMethod
+  /** Request URL including any query string (e.g. `/users/42?expand=posts`). */
+  url: string
+  /**
+   * Request headers. Names are lowercased before they reach the handler so
+   * `ctx.headers['x-custom']` works regardless of the casing passed here
+   * (matching node:http's lowercasing of inbound headers).
+   */
+  headers?: Record<string, string | string[]>
+  /**
+   * Request body. A `string` / `Buffer` / `Uint8Array` is sent verbatim; a
+   * plain object is JSON-serialized and (unless the caller set a
+   * `content-type`) tagged `application/json`.
+   */
+  body?: string | Buffer | Uint8Array | Record<string, unknown> | unknown[]
+  /** Socket peer address surfaced as `ctx.remoteAddress`. Defaults to `127.0.0.1`. */
+  remoteAddress?: string
+}
+
+/**
+ * Result of {@link IngeniumApp.inject}. A fully-materialized snapshot of the
+ * response — captured BEFORE the pooled context is released, so reading any
+ * field is safe even though the underlying context has been recycled.
+ */
+export interface InjectResponse {
+  /** Final HTTP status code. */
+  status: number
+  /**
+   * Response headers, lowercased. A deep-ish copy of the context's header bag
+   * (the array values are cloned) so sequential `inject()` calls never share
+   * or bleed header state.
+   */
+  headers: Record<string, string | string[]>
+  /**
+   * Response body decoded as a UTF-8 string. Stream responses are drained to
+   * completion first; a bodyless response (`{ kind: 'none' }`) yields `''`.
+   */
+  body: string
+  /** Parse {@link InjectResponse.body} as JSON. Throws on invalid JSON, like `JSON.parse`. */
+  json<T = unknown>(): T
+}
+
+/**
  * Per-route options object accepted as the second positional arg to a verb
  * registration (`app.get(path, { auth: ['admin'] }, handler)`). Each key must
  * match a registered declarator (see `app.declare(...)`); the value is passed
@@ -224,6 +275,15 @@ export class IngeniumApp implements PluginTarget {
   private readonly _hasTimeout: boolean
   private readonly _hasTrustProxy: boolean
   private _useFastPath = false
+
+  /**
+   * @internal Whether `listen()` has bound a server that hasn't been closed
+   * yet. Guards against the double-listen footgun: a second `listen()` on the
+   * same app would silently bind a second server (two ports dispatching to one
+   * pool), almost always a copy-paste mistake. Cleared when the returned
+   * handle's `close()` resolves, so re-listening after a clean shutdown works.
+   */
+  private _listening = false
 
   constructor(options: IngeniumAppOptions = {}) {
     this.pool = new IngeniumContextPool(options.poolSize ?? 1024)
@@ -353,10 +413,13 @@ export class IngeniumApp implements PluginTarget {
    */
   scope(
     prefix: string,
-    registrar: (scope: PluginTarget) => void | Promise<void>,
+    registrar: (scope: PluginTarget) => void,
   ): this {
     const scoped = new ScopedApp(this, prefix)
-    const ret = registrar(scoped as unknown as PluginTarget)
+    // Return is typed `void` so concise chainable arrows (`s => s.get(...)`)
+    // and async registrars both satisfy the signature; we still thenable-check
+    // the actual value to re-mark dirty if it resolves later.
+    const ret: unknown = registrar(scoped as unknown as PluginTarget)
     // If the registrar is async, it's the caller's responsibility to await it
     // (e.g. by awaiting `scope.register(asyncPlugin)` inside the body). We
     // still mark dirty eagerly so synchronous registrations recompose next.
@@ -978,8 +1041,14 @@ export class IngeniumApp implements PluginTarget {
       throw miss
     }
     const applicable: IngeniumMiddleware[] = [...flat.globalMiddleware]
+    // Collapse runs of '/' before the prefix check so a non-normalized request
+    // path (e.g. `//admin/x`) can't slip past a deny-by-default / audit / security
+    // gate scoped to `/admin`: `pathStartsWith('//admin/x', '/admin')` is false.
+    // Matched routes bake their chain at compose time, so this only matters on the
+    // trie-miss fallback. Local-only — ctx.path is left untouched.
+    const normalizedPath = ctx.path.includes('//') ? ctx.path.replace(/\/{2,}/g, '/') : ctx.path
     for (const scoped of flat.scopedMiddleware) {
-      if (pathStartsWith(ctx.path, scoped.prefix)) applicable.push(scoped.mw)
+      if (pathStartsWith(normalizedPath, scoped.prefix)) applicable.push(scoped.mw)
     }
     if (applicable.length === 0) {
       throw miss
@@ -1004,10 +1073,54 @@ export class IngeniumApp implements PluginTarget {
     writeDefaultError(err, ctx)
   }
 
+  // ───── In-process test client ──────────────────────────────────────────
+
+  /**
+   * Dispatch a synthetic request through the SAME path as the wire — no
+   * socket, no transport. Acquires a pooled context, populates it exactly as
+   * the Node adapter would from an `IncomingMessage`, runs `handle()` (so
+   * routing, 404/405, middleware, hooks, and the error boundary all behave
+   * identically), then materializes the response into a plain {@link InjectResponse}.
+   *
+   * Crucially the context is extracted FULLY and only THEN released back to
+   * the pool: releasing bumps `_epoch` and reassigns `_headers`/`_body`, so
+   * reading them after release would surface the next request's state (or
+   * empty). The returned object holds copies, so it survives the recycle and
+   * sequential `inject()` calls never bleed header/body state into each other.
+   *
+   * @example
+   *   const res = await app.inject({ method: 'POST', url: '/users', body: { name: 'a' } })
+   *   expect(res.status).toBe(201)
+   *   expect(res.json<{ id: string }>().id).toBeDefined()
+   */
+  async inject(opts: InjectRequest): Promise<InjectResponse> {
+    if (this.dirty) await this.composeAsync()
+
+    const ctx = this.pool.acquire()
+    try {
+      populateInjectContext(ctx, opts)
+      await this.handle(ctx)
+      // Extract EVERYTHING before release — see the doc comment above.
+      return await extractInjectResponse(ctx)
+    } finally {
+      this.pool.release(ctx)
+    }
+  }
+
   // ───── Transport ─────────────────────────────────────────────────────────
 
   /** Bind a port and accept requests. Returns a handle for graceful shutdown. */
   async listen(port: number, host?: string): Promise<ListeningServer> {
+    // Double-listen guard. Binding a second server to the same app means two
+    // ports feeding one context pool — almost always a copy-paste bug. Throw a
+    // clear TypeError instead of silently double-binding. Re-listening after a
+    // clean `close()` is allowed (the flag is cleared there).
+    if (this._listening) {
+      throw new TypeError(
+        'ingenium: app.listen() called while already listening. Call close() on the ' +
+          'returned server handle before listening again, or create a separate app.',
+      )
+    }
     if (this.dirty) await this.composeAsync()
     this.transport.attach({
       acquire: () => this.pool.acquire(),
@@ -1019,6 +1132,10 @@ export class IngeniumApp implements PluginTarget {
       ? await this.transport.listen(port, host)
       : await this.transport.listen(port)
 
+    // Mark listening only AFTER the bind succeeds — a failed bind (e.g. port
+    // in use) leaves the app re-listenable.
+    this._listening = true
+
     // Wrap the underlying close so cron timers + queue worker pools are torn
     // down as part of graceful shutdown. Sockets and queues drain in parallel
     // (wall-clock bounded by max(socket-drain, queue-drain), not their sum).
@@ -1026,6 +1143,10 @@ export class IngeniumApp implements PluginTarget {
     const queues = this._queues
     const crons = this._crons
     const wrappedClose: ListeningServer['close'] = async (closeOpts) => {
+      // Allow a fresh listen() once shutdown begins. Cleared before the await
+      // so a re-listen racing the drain still binds (the old server is already
+      // refusing new connections via server.close()).
+      this._listening = false
       // Stop cron tickers FIRST so they don't enqueue new work mid-shutdown.
       crons.stopAll()
       const queueDrain = queues.drainAll(drainTimeout)
@@ -1083,6 +1204,122 @@ function writeDefaultError(err: unknown, ctx: IngeniumContext): void {
 }
 
 /**
+ * Populate a pooled context from {@link InjectRequest}, mirroring the Node
+ * adapter's `populateContext`. Splits path / query, lowercases header names,
+ * normalizes the body into a `Readable` (so `ctx.body.*` consumers behave
+ * exactly as they do on the wire), and tags JSON bodies with a content-type
+ * unless the caller set one.
+ */
+function populateInjectContext(ctx: IngeniumContext, opts: InjectRequest): void {
+  ctx.method = opts.method ?? 'GET'
+  ctx.url = opts.url
+  const qIdx = opts.url.indexOf('?')
+  if (qIdx >= 0) {
+    ctx.path = opts.url.slice(0, qIdx)
+    ctx.rawQuery = opts.url.slice(qIdx + 1)
+  } else {
+    ctx.path = opts.url
+    ctx.rawQuery = ''
+  }
+
+  // Lowercase header names (node:http convention). Collect into the bag the
+  // handler reads via ctx.headers[...].
+  const headers: Record<string, string | string[]> = {}
+  if (opts.headers) {
+    for (const name of Object.keys(opts.headers)) {
+      headers[name.toLowerCase()] = opts.headers[name] as string | string[]
+    }
+  }
+
+  ctx.remoteAddress = opts.remoteAddress ?? '127.0.0.1'
+  ctx.baseProtocol = 'http'
+
+  // Normalize the body into raw bytes. Objects → JSON (+ default content-type
+  // unless the caller already set one). Strings/Buffers/Uint8Arrays pass
+  // through verbatim. `undefined` → no body.
+  let bodyBuf: Buffer | null = null
+  const body = opts.body
+  if (body !== undefined) {
+    if (typeof body === 'string') {
+      bodyBuf = Buffer.from(body, 'utf8')
+    } else if (Buffer.isBuffer(body)) {
+      bodyBuf = body
+    } else if (body instanceof Uint8Array) {
+      bodyBuf = Buffer.from(body)
+    } else {
+      // Plain object / array → JSON. Auto-tag content-type unless explicit.
+      bodyBuf = Buffer.from(JSON.stringify(body), 'utf8')
+      if (headers['content-type'] === undefined) {
+        headers['content-type'] = 'application/json'
+      }
+    }
+  }
+
+  ctx.headers = headers
+
+  if (bodyBuf !== null) {
+    const ct = headers['content-type']
+    ctx.body._attach(
+      Readable.from(bodyBuf),
+      Array.isArray(ct) ? ct[0] : ct,
+      bodyBuf.length,
+    )
+  } else {
+    ctx.body._attach(null, undefined, undefined)
+  }
+}
+
+/**
+ * Materialize a dispatched context's response into a plain {@link InjectResponse}.
+ * Clones the header bag (array values copied) so callers never alias the
+ * pooled context's `_headers`, and drains a stream body to a UTF-8 string.
+ * MUST be called before the context is released back to the pool.
+ */
+async function extractInjectResponse(ctx: IngeniumContext): Promise<InjectResponse> {
+  const status = ctx._statusCode
+
+  // Deep-ish copy of headers — array values cloned so a later inject() can't
+  // mutate this snapshot (and vice versa).
+  const headers: Record<string, string | string[]> = {}
+  for (const key of Object.keys(ctx._headers)) {
+    const v = ctx._headers[key]
+    if (v === undefined) continue
+    headers[key] = Array.isArray(v) ? v.slice() : v
+  }
+
+  let body = ''
+  const rb = ctx._body
+  switch (rb.kind) {
+    case 'string':
+      body = rb.data
+      break
+    case 'buffer':
+      body = rb.data.toString('utf8')
+      break
+    case 'stream': {
+      const chunks: Buffer[] = []
+      for await (const chunk of rb.data) {
+        chunks.push(typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : (chunk as Buffer))
+      }
+      body = Buffer.concat(chunks).toString('utf8')
+      break
+    }
+    case 'none':
+      body = ''
+      break
+  }
+
+  return {
+    status,
+    headers,
+    body,
+    json<T = unknown>(): T {
+      return JSON.parse(body) as T
+    },
+  }
+}
+
+/**
  * Detect whether a value is a "plain options object" — i.e. the declarative
  * route-options shape (`{ auth: [...], rateLimit: '...' }`) — vs anything
  * else that might be in argument-position 0 (a middleware function, a
@@ -1126,8 +1363,8 @@ function buildDescriptorFromBuiltins(
   if ('operationId' in builtins) desc.operationId = builtins.operationId as string
   if ('tags' in builtins) desc.tags = builtins.tags as string[]
   if ('deprecated' in builtins) desc.deprecated = builtins.deprecated as boolean
-  if ('security' in builtins) desc.security = builtins.security as RouteDescriptor['security']
-  if ('parameters' in builtins) desc.parameters = builtins.parameters as RouteDescriptor['parameters']
+  if ('security' in builtins) desc.security = builtins.security as NonNullable<RouteDescriptor['security']>
+  if ('parameters' in builtins) desc.parameters = builtins.parameters as NonNullable<RouteDescriptor['parameters']>
   if ('response' in builtins) {
     desc.responses = normalizeResponse(method, path, builtins.response)
   }
@@ -1255,7 +1492,7 @@ function normalizeResponse(
   // Single 200 entry. If it already looks like a Response (has description
   // and/or content), pass it through; otherwise wrap as JSON content.
   if ('content' in obj || ('description' in obj && !looksLikeSchemaLiteral(obj))) {
-    return { '200': obj as Response }
+    return { '200': obj as unknown as Response }
   }
   return {
     '200': {
@@ -1280,7 +1517,7 @@ function coerceResponseEntry(method: HttpMethod, path: string, value: unknown): 
   }
   const obj = value as Record<string, unknown>
   if ('content' in obj || ('description' in obj && !looksLikeSchemaLiteral(obj))) {
-    return obj as Response
+    return obj as unknown as Response
   }
   return {
     description: 'Response',
@@ -1303,7 +1540,7 @@ function normalizeRequestBody(
     return { content: { 'application/json': { schema: value as Schema } } }
   }
   const obj = value as Record<string, unknown>
-  if ('content' in obj) return obj as RequestBody
+  if ('content' in obj) return obj as unknown as RequestBody
   return { content: { 'application/json': { schema: obj as Schema } } }
 }
 

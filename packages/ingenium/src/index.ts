@@ -18,7 +18,14 @@ import { apiKeyMiddleware } from './api-key/middleware.ts'
 import { openapiHandler } from './openapi/handler.ts'
 
 // ───── App + Router ────────────────────────────────────────────────────────
-export { IngeniumApp, type IngeniumAppOptions, type IngeniumErrorHandler, type RouteOptions } from './app.ts'
+export {
+  IngeniumApp,
+  type IngeniumAppOptions,
+  type IngeniumErrorHandler,
+  type RouteOptions,
+  type InjectRequest,
+  type InjectResponse,
+} from './app.ts'
 export { Router, RouteBuilder } from './router/router.ts'
 
 // ───── Context + Body ──────────────────────────────────────────────────────
@@ -148,7 +155,7 @@ export type {
 } from './idempotency/types.ts'
 
 // ───── JWT middleware ──────────────────────────────────────────────────────
-export { jwtMiddleware } from './jwt/middleware.ts'
+export { jwtMiddleware, IngeniumJwtKeyAlgMismatchError } from './jwt/middleware.ts'
 export { verifyJwt } from './jwt/verify.ts'
 export { fetchJwks, clearJwksCache } from './jwt/jwks.ts'
 export type {

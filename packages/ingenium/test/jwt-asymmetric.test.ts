@@ -31,6 +31,12 @@ function ctxWith(headers: Record<string, string | string[]> = {}): IngeniumConte
 
 const next = (): Promise<void> => Promise.resolve()
 
+// verifyJwt now requires `exp` by default (requireExp). Sign helpers inject a
+// valid far-future exp unless the test supplied its own, so tests keep
+// exercising signature/alg/kid/JWKS behavior rather than tripping on expiry.
+const withDefaultExp = (p: Record<string, unknown>): Record<string, unknown> =>
+  'exp' in p ? p : { ...p, exp: Math.floor(Date.now() / 1000) + 60 }
+
 /** Sign a JWT with an asymmetric key. Picks the right OpenSSL options per alg. */
 function signAsym(
   payload: Record<string, unknown>,
@@ -40,7 +46,7 @@ function signAsym(
 ): string {
   const header = { alg, typ: 'JWT', ...headerOverrides }
   const headerB64 = b64url(JSON.stringify(header))
-  const payloadB64 = b64url(JSON.stringify(payload))
+  const payloadB64 = b64url(JSON.stringify(withDefaultExp(payload)))
   const signingInput = `${headerB64}.${payloadB64}`
 
   const digest = alg.endsWith('256') ? 'sha256' : alg.endsWith('384') ? 'sha384' : 'sha512'
@@ -80,7 +86,7 @@ function signHmac(
   const digest = alg.endsWith('256') ? 'sha256' : alg.endsWith('384') ? 'sha384' : 'sha512'
   const header = { alg, typ: 'JWT', ...headerOverrides }
   const headerB64 = b64url(JSON.stringify(header))
-  const payloadB64 = b64url(JSON.stringify(payload))
+  const payloadB64 = b64url(JSON.stringify(withDefaultExp(payload)))
   const signingInput = `${headerB64}.${payloadB64}`
   const sig = createHmac(digest, secret).update(signingInput).digest('base64url')
   return `${signingInput}.${sig}`
@@ -280,9 +286,13 @@ describe('jwtMiddleware — JWKS', () => {
   })
 
   it('refetches after the TTL expires', async () => {
+    // A `Response` body is single-use (`res.json()` consumes the stream), and
+    // this test triggers two real fetches (initial + post-TTL refetch). Return
+    // a FRESH Response per call — mirroring real `fetch` — instead of reusing
+    // one consumable object, which would make the second `res.json()` throw.
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
-      .mockResolvedValue(jwksResponse('jwks-k1', rsa.publicKey))
+      .mockImplementation(async () => jwksResponse('jwks-k1', rsa.publicKey))
 
     const tok = signAsym({ sub: 'ttl' }, rsa.privateKey, 'RS256', { kid: 'jwks-k1' })
 
@@ -327,7 +337,11 @@ describe('jwtMiddleware — JWKS', () => {
     const p1 = mw(c1, next)
     const p2 = mw(c2, next)
 
-    // Both should be awaiting the SAME fetch.
+    // The middleware `await`s `getToken` before it ever reaches `fetchJwks`,
+    // so `fetch` is dispatched on a later microtask — not synchronously here.
+    // Flush the microtask queue so both calls have entered `fetchJwks` before
+    // we assert. Both should then be awaiting the SAME in-flight fetch.
+    await new Promise((r) => setTimeout(r, 0))
     expect(fetchSpy).toHaveBeenCalledTimes(1)
 
     resolveFetch(jwksResponse('jwks-k1', rsa.publicKey))

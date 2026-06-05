@@ -12,6 +12,16 @@ export class TrieNode {
   wildcardChild: TrieNode | null = null
   wildcardName: string | null = null
 
+  /**
+   * Compiled inline constraint for this node *as a param child*, or `null`
+   * when the param is unconstrained. Set at insert time when the registered
+   * segment carries a `(regex)` group (e.g. `:id(\d+)`). The `find()` hot
+   * path loads this field and only runs `.test()` when it is non-null, so
+   * unconstrained routes pay zero extra cost. Lives on the param node itself
+   * (the child) so the matcher can test it the instant it descends.
+   */
+  paramConstraint: RegExp | null = null
+
   /** Per-method composed handlers, populated by `RouteRegistry` after compose. */
   handlers: Partial<Record<HttpMethod, ComposedHandler>> = {}
 
@@ -58,14 +68,35 @@ export class RouterTrie {
       if (seg.length === 0) continue
 
       if (seg[0] === ':') {
-        const name = seg.slice(1).replace(/\?$/, '')
+        const { name, constraint } = parseParamSegment(seg)
         if (!node.paramChild) {
           node.paramChild = new TrieNode()
           node.paramName = name
-        } else if (node.paramName !== name) {
-          throw new Error(
-            `Conflicting param names at the same trie level: ':${node.paramName}' vs ':${name}'`,
-          )
+          node.paramChild.paramConstraint = constraint
+        } else {
+          if (node.paramName !== name) {
+            throw new Error(
+              `Conflicting param names at the same trie level: ':${node.paramName}' vs ':${name}'`,
+            )
+          }
+          // Same name, but the constraint may differ. Rule: a constraint is a
+          // promise about the shape of matched segments; two registrations of
+          // the same param must agree on that promise. We require the *source*
+          // of the compiled regex to match (or both to be unconstrained).
+          // Last-writer-wins would silently let one route's `:id(\d+)` weaken
+          // another's, which is a footgun, so we throw instead — same style as
+          // the param-name conflict above.
+          const existing = node.paramChild.paramConstraint
+          const incoming = constraint
+          const existingSrc = existing ? existing.source : ''
+          const incomingSrc = incoming ? incoming.source : ''
+          if (existingSrc !== incomingSrc) {
+            const fmt = (n: string, c: RegExp | null) => (c ? `:${n}(...)` : `:${n}`)
+            throw new Error(
+              `Conflicting param constraints at the same trie level: ` +
+                `'${fmt(name, existing)}' vs '${fmt(name, incoming)}' for param ':${name}'`,
+            )
+          }
         }
         paramNames.push(name)
         node = node.paramChild
@@ -135,10 +166,22 @@ export class RouterTrie {
       }
 
       if (node.paramChild) {
-        paramValues.push(decodeParam(seg))
-        node = node.paramChild
-        i++
-        continue
+        // Hot-path gate: only constrained params (a tiny minority of routes)
+        // run a regex. The field load + `!== null` is one branch; unconstrained
+        // routes never touch `.test()`, so they pay zero extra cost. Constrained
+        // routes pay one anchored `.test()` against the raw segment — justified
+        // because the alternative (matching, then 404ing in user code) is both
+        // slower and wrong (a sibling `*wild` could legitimately catch it).
+        const constraint = node.paramChild.paramConstraint
+        if (constraint === null || constraint.test(seg)) {
+          paramValues.push(decodeParam(seg))
+          node = node.paramChild
+          i++
+          continue
+        }
+        // Constraint miss: this param branch is dead. Fall through to the
+        // wildcard child / backtrack stack exactly as a structural dead-end
+        // would, so a sibling `*wild` can still catch the segment, else 404.
       }
 
       if (node.wildcardChild) {
@@ -214,6 +257,45 @@ function splitPath(path: string): string[] {
   if (end > start && path[end - 1] === '/') end--
   if (start >= end) return []
   return path.slice(start, end).split('/')
+}
+
+/**
+ * Parse a `:param` segment into its clean name and an optional compiled
+ * constraint. Runs at *insert* time only (never on the request hot path), so
+ * the regex compile cost is paid once per route.
+ *
+ * Grammar handled:
+ *   `:name`            → { name: 'name', constraint: null }
+ *   `:name?`           → { name: 'name', constraint: null }
+ *   `:name(regex)`     → { name: 'name', constraint: /^(?:regex)$/ }
+ *   `:name(regex)?`    → { name: 'name', constraint: /^(?:regex)$/ }
+ *
+ * The constraint is anchored with `^(?:...)$` so it must match the *entire*
+ * segment — a partial match (e.g. `\d+` against `12a`) does NOT slip through.
+ * The `(?:...)` wrapper keeps the user's alternations (`a|b`) from binding
+ * past the anchors.
+ */
+function parseParamSegment(seg: string): { name: string; constraint: RegExp | null } {
+  // Strip the leading ':'.
+  let body = seg.slice(1)
+
+  // Strip a trailing optional marker first; it sits *after* the constraint
+  // group in the documented grammar (`:id(\d+)?`).
+  if (body.length > 0 && body[body.length - 1] === '?') {
+    body = body.slice(0, -1)
+  }
+
+  // Detect a constraint group: `name(regex)`. The regex body is everything
+  // between the first '(' and the final ')'.
+  const open = body.indexOf('(')
+  if (open !== -1 && body[body.length - 1] === ')') {
+    const name = body.slice(0, open)
+    const pattern = body.slice(open + 1, -1)
+    // Anchor fully so the constraint governs the whole segment.
+    return { name, constraint: new RegExp(`^(?:${pattern})$`) }
+  }
+
+  return { name: body, constraint: null }
 }
 
 function decodeParam(raw: string): string {

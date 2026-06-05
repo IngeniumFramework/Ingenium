@@ -187,11 +187,38 @@ function populateContext(ctx: IngeniumContext, req: IncomingMessage, maxRequestB
     contentLength !== undefined &&
     Number.isFinite(contentLength) &&
     contentLength <= maxRequestBytes
-  const source =
-    noBody || !Number.isFinite(maxRequestBytes) || knownSafe
-      ? req
-      : req.pipe(createByteLimit(maxRequestBytes))
-  ctx.body._attach(source, ct, Number.isFinite(contentLength) ? contentLength : undefined)
+  if (noBody || !Number.isFinite(maxRequestBytes) || knownSafe) {
+    ctx.body._attach(req, ct, Number.isFinite(contentLength) ? contentLength : undefined)
+    return
+  }
+
+  // Cap unknown-length (chunked) bodies with a byte-limit Transform. `pipe()`
+  // does NOT forward `'error'` events, so when the chunked path in
+  // `IngeniumBody.buffer` re-pipes this Transform into a SECOND limiter and only
+  // listens on the downstream pipe, the cap error here would (a) be an
+  // unhandled-error crash and (b) never reach that downstream — so the
+  // consumer's promise would hang. Attach a guard `'error'` listener and
+  // forward the error to every stream this Transform was piped into. We leave
+  // `req`/its socket alone so the response (413) can still flush.
+  const limited = createByteLimit(maxRequestBytes)
+  const downstream = new Set<{ destroy(err?: Error): void; destroyed: boolean }>()
+  const origPipe = limited.pipe.bind(limited) as typeof limited.pipe
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  limited.pipe = function pipe(dest: any, ...rest: any[]) {
+    downstream.add(dest)
+    return origPipe(dest, ...rest)
+  } as typeof limited.pipe
+  limited.on('error', (err: Error) => {
+    for (const dest of downstream) {
+      if (!dest.destroyed) dest.destroy(err)
+    }
+    // Discard the rest of the inbound body so the socket can be reused/closed.
+    req.unpipe(limited)
+    req.on('error', () => {})
+    req.resume()
+  })
+  req.pipe(limited)
+  ctx.body._attach(limited, ct, Number.isFinite(contentLength) ? contentLength : undefined)
 }
 
 function writeResponse(ctx: IngeniumContext, res: ServerResponse): void {

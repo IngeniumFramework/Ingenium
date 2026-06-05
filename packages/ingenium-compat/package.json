@@ -1,21 +1,27 @@
 {
   "name": "ingenium-compat",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Express middleware compatibility shim for Ingenium.",
   "type": "module",
-  "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     }
   },
   "files": [
-    "src"
+    "dist",
+    "src",
+    "README.md"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
   },
   "engines": {
     "node": ">=20.0.0"

@@ -2,7 +2,7 @@
 
 ## ⚠️ Production caveats — read first
 
-**Not production-ready for multi-instance deploys.** The default in-memory stores for sessions, idempotency, and rate-limit don't share state across pods. Use the Redis-backed adapters in [`ingenium-redis`](../packages/ingenium-redis) before deploying behind a load balancer.
+**Not production-ready for multi-instance deploys.** The default in-memory stores for sessions, idempotency, rate-limit, and background-job queues don't share state across pods. Use the Redis-backed adapters in [`ingenium-redis`](../packages/ingenium-redis) before deploying behind a load balancer.
 
 **Alpha API surface.** Verb registration, `ctx` shape, and middleware composition are stable enough to use; everything tagged `@internal` may change before 0.1.0.
 
@@ -10,8 +10,8 @@
 
 | Milestone | Goal | Status |
 |---|---|---|
-| **v0.0.x** | Feature-complete framework surface; alpha API. | current |
-| **v0.1.0** | All Redis stores shipped; plugin scoping; `ExtractParams` runtime narrowing; benchmark matrix on CI. | in progress |
+| **v0.0.x** | Feature-complete framework surface; alpha API. | released |
+| **v0.1.0** | All Redis stores shipped; plugin scoping; `ExtractParams` runtime narrowing; benchmark matrix on CI. | feature-complete on `main` |
 | **v1.0.0** | API frozen. SemVer stability commitment. Production deployments officially supported. | planned |
 
 ## Shipped in v0.0.1
@@ -46,6 +46,15 @@
 
 ---
 
+## Shipped in v0.1.0
+
+- **All Redis stores shipped.** `ingenium-redis` now ships `RedisQueueStore` alongside the existing session / idempotency / rate-limit adapters, so every pluggable store in core (`SessionStore`, `IdempotencyStore`, `RateLimitStore`, `QueueStore`) has a multi-replica Redis backing. The queue store is all-Lua (atomic `next` / `retry` / `fail`) and keeps the `RedisClientLike` surface unchanged.
+- **`ExtractParams` runtime constraint enforcement.** Inline param constraints (`:id(\d+)`, `:slug([a-z-]+)`) are now honored at request time — the trie compiles the constraint once at insert and tests the segment at match, falling through to wildcard/404 on a miss. The hot path is gated: routes without constraints pay one field load and zero regex. Param values remain strings; type-level number-narrowing stays deferred (see below). See ADR 0006.
+- **Plugin / middleware scoping.** `app.scope(prefix, register)` confines a plugin's `use` / `before` / `after` / route registrations to a path subtree, resolved at compose time with no per-request cost. `PluginTarget` (implemented by both `IngeniumApp` and `ScopedApp`) now exposes the full registration surface including `before` / `after`.
+- **Benchmark matrix on CI.** The v2 harness runs five scenarios — hello, body, middleware, and ~1KB / ~100KB JSON-payload echo — across an Express / Fastify / Hono / Ingenium matrix, on a Node `[20, 22]` CI matrix, triggered per-PR (path-filtered to `benchmarks/**` and `packages/ingenium/**`) plus nightly and on demand. Competitor versions are pinned to exact releases, and each run reports the server child process's RSS alongside throughput / latency. These stay local/CI regression detectors, not published comparative claims.
+
+---
+
 ## Performance
 
 We do not publish benchmark numbers in this repo. Run the local harness in
@@ -57,21 +66,17 @@ during development, not marketing material.
 
 ---
 
-## Known issues — bugs
-
-- **`ExtractParams` doesn't narrow constrained params** — `:id(\\d+)` strips the constraint and stays `string`. Unconstrained params (`:id`) now narrow correctly. The router doesn't yet honor inline constraints at runtime; types and runtime have to land together.
-
 ## Known issues — gaps
 
-- **No per-route OpenAPI inline schema yet** — schemas live in a separate `app.describe(...)` call instead of `app.get('/path', { response: Schema }, handler)`. Tracked for 0.1.0.
+- **Inline OpenAPI accepts raw schemas only** — `app.get('/path', { response: Schema }, handler)` works for raw OpenAPI Schema objects, but Standard Schema / Zod validators passed inline still throw at registration (validator → JSON Schema conversion is deferred; see below). The `app.describe(...)` call remains for the validator case.
 
 ---
 
 ## Deferred to next session
 
-### Full benchmark matrix vs Fastify + Hono on CI
+### Bun runs in the benchmark matrix
 
-The local `bench:v2` harness covers hello-world, JSON echo, and middleware-stack on Node — and includes Hono, Fastify, and Express side-by-side. What's still missing: pinned dependency versions, isolated CPU pinning, Bun runs in the same matrix, 1KB / 100KB payload scenarios, RSS tracking, and a CI runner that publishes the numbers per PR. Honest comparative numbers need that infra; spinning it up is its own session.
+The benchmark matrix (pinned versions, 1KB / 100KB payloads, RSS, per-PR CI) shipped in v0.1.0, but it still varies only Node `[20, 22]`. The harness spawns Node child processes, so running it under Bun would not exercise the Bun runtime end-to-end — covering Bun needs a Bun-native v2 harness. Isolated CPU pinning for publishable comparative numbers also remains out of scope here.
 
 ### Inline OpenAPI schema conversion
 
@@ -85,9 +90,9 @@ Both subsystems still hand-roll cookie writes — there's a `// TODO: migrate to
 
 Standard Schema v1 covers TypeBox already; a tighter integration that consumes TypeBox compiled validators could shave validation overhead. Worth doing only after the benchmark matrix lands so the gain is measurable.
 
-### Constrained param type narrowing
+### Constrained param type narrowing (to `number`)
 
-Extend `ExtractParams<Path>` to recognize numeric / regex / enum constraints in the path syntax (e.g. `/users/:id(\\d+)`) and narrow `ctx.params.id` to `number`. Deferred because the routing layer doesn't yet honor inline constraints at runtime; types and runtime have to land together.
+Runtime enforcement of inline constraints shipped in v0.1.0 (`:id(\\d+)` only matches digits — see ADR 0006), but param values are still always `string`. The remaining enhancement is type-level: recognize numeric / enum constraints in `ExtractParams<Path>` and coerce + narrow `ctx.params.id` to `number`. Deferred because auto-coercing param values changes the `ctx.params` value contract (and its V8 hidden-class shape) — it deserves its own decision now that the runtime half is in place.
 
 ### Scoped decorators
 

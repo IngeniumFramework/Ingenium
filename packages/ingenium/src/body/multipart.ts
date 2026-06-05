@@ -165,7 +165,15 @@ export function parseMultipart(
   const allowed = opts.allowedMimePrefixes
 
   const boundary = extractBoundary(contentType)
-  const result: MultipartResult = { fields: {}, files: {} }
+  // Use null-prototype maps so an attacker-chosen part name (`__proto__`,
+  // `constructor`, `prototype`) is stored as plain own-data instead of tripping
+  // the `__proto__` setter — which would otherwise reparent the maps' prototype
+  // and corrupt the membership/lookup logic in `appendField`. Mirrors the query
+  // parser's `toShallowArrayObject` in context.ts.
+  const result: MultipartResult = {
+    fields: Object.create(null),
+    files: Object.create(null),
+  }
 
   // Empty body → empty result. (No boundary delimiter at all.)
   if (buffer.length === 0) return result

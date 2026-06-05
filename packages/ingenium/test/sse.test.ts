@@ -84,7 +84,7 @@ describe('sse() — single helper', () => {
       setTimeout(() => stream.close(), 5)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
     expect(response.headers['content-type']).toMatch(/text\/event-stream/)
     expect(response.headers['cache-control']).toBe('no-cache')
@@ -93,6 +93,9 @@ describe('sse() — single helper', () => {
     const body = await readChunk(response, 1)
     expect(body).toBe('data: hello\n\n')
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 
@@ -103,11 +106,14 @@ describe('sse() — single helper', () => {
       setTimeout(() => stream.close(), 5)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
     const body = await readChunk(response, 1)
     expect(body).toBe('data: line one\ndata: line two\ndata: line three\n\n')
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 
@@ -118,11 +124,14 @@ describe('sse() — single helper', () => {
       setTimeout(() => stream.close(), 5)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
     const body = await readChunk(response, 1)
     expect(body).toBe('event: ping\nid: 42\ndata: pong\n\n')
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 
@@ -133,11 +142,14 @@ describe('sse() — single helper', () => {
       setTimeout(() => stream.close(), 5)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
     const body = await readChunk(response, 1)
     expect(body).toBe(`data: ${JSON.stringify({ hello: 'world', n: 1 })}\n\n`)
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 
@@ -148,7 +160,7 @@ describe('sse() — single helper', () => {
       stream.close()
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
     let ended = false
     response.on('end', () => {
@@ -158,6 +170,9 @@ describe('sse() — single helper', () => {
     await new Promise<void>((resolve) => response.once('end', resolve))
     expect(ended).toBe(true)
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 
@@ -168,11 +183,14 @@ describe('sse() — single helper', () => {
       setTimeout(() => stream.close(), 5)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
     const body = await readChunk(response, 1)
     expect(body).toBe('data: quick\n\n')
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 })
@@ -192,7 +210,7 @@ describe('startKeepAlive()', () => {
       }, 250)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
 
     let body = ''
@@ -206,6 +224,9 @@ describe('startKeepAlive()', () => {
     expect(matches.length).toBeGreaterThanOrEqual(2)
     expect((capturedStream as SseStream | null)?.closed).toBe(true)
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 
@@ -218,7 +239,7 @@ describe('startKeepAlive()', () => {
       setTimeout(() => stream.close(), 200)
     })
 
-    const { res } = getRequest(server)
+    const { req, res } = getRequest(server)
     const response = await res
 
     let body = ''
@@ -231,6 +252,9 @@ describe('startKeepAlive()', () => {
     const matches = body.match(/: keepalive\n\n/g) ?? []
     expect(matches.length).toBeLessThanOrEqual(1)
 
+    // Close the client socket so the server's keep-alive connection (Node
+    // defaults keepAliveTimeout to 5s) doesn't hold server.close() open.
+    req.destroy()
     await server.close()
   })
 })

@@ -1,7 +1,7 @@
 {
   "name": "ingenium-benchmarks",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.0.2",
   "type": "module",
   "description": "Local regression benchmarks for Ingenium vs Express/Fastify/Hono. NOT publishable performance claims.",
   "scripts": {
@@ -13,19 +13,22 @@
     "bench:v2": "tsx scenarios/v2/run-all.ts",
     "bench:hello-v2": "tsx scenarios/v2/hello.ts",
     "bench:body-v2": "tsx scenarios/v2/body.ts",
-    "bench:middleware-v2": "tsx scenarios/v2/middleware.ts"
+    "bench:middleware-v2": "tsx scenarios/v2/middleware.ts",
+    "bench:payload-1kb-v2": "tsx scenarios/v2/payload-1kb.ts",
+    "bench:payload-100kb-v2": "tsx scenarios/v2/payload-100kb.ts"
   },
+  "//competitor-pins": "Competitor framework versions are pinned to EXACT versions (no ^/~). Comparative numbers are only meaningful against pinned deps: a silent minor bump of any competitor would shift the baseline and make a regression indistinguishable from an upstream change. These are the versions resolved by the repo lockfile at the time of pinning. Bump them deliberately, in their own commit, so the version delta is reviewable alongside any bench movement.",
   "dependencies": {
-    "@hono/node-server": "^1.13.0",
-    "autocannon": "^7.15.0",
-    "express": "^4.21.0",
-    "fastify": "^5.0.0",
-    "hono": "^4.6.0",
+    "@hono/node-server": "1.19.14",
+    "autocannon": "7.15.0",
+    "express": "4.22.2",
+    "fastify": "5.8.5",
+    "hono": "4.12.18",
     "ingenium": "*",
-    "tinybench": "^3.0.0"
+    "tinybench": "3.1.1"
   },
   "devDependencies": {
-    "@types/express": "^4.17.21",
-    "tsx": "^4.19.0"
+    "@types/express": "4.17.25",
+    "tsx": "4.21.0"
   }
 }

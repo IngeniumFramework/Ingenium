@@ -79,7 +79,7 @@ describe('ctx.query.parse(schema)', () => {
         version: 1 as const,
         vendor: 'test',
         validate(input: unknown): { value: { city: string } } {
-          return { value: { city: (input as Record<string, string>).city } }
+          return { value: { city: (input as { city: string }).city } }
         },
       },
     }

@@ -20,7 +20,9 @@ export type CorsOriginFn = (
 /**
  * Spec for the `origin` option.
  *
- * - `boolean` — `true` reflects any request `Origin`; `false` disables CORS.
+ * - `boolean` — `true` reflects any request `Origin` (but never the literal
+ *   `"null"`, and rejected at construction when `credentials: true`); `false`
+ *   disables CORS.
  * - `'*'` — wildcard: `Access-Control-Allow-Origin: *`.
  * - any other `string` — exact match against the request's `Origin`.
  * - `string[]` — allowlist; matched exactly.
@@ -62,8 +64,9 @@ export interface CorsOptions {
 
   /**
    * If `true`, sets `Access-Control-Allow-Credentials: true`.
-   * Incompatible with `origin: '*'` — throws at construction time.
-   * Default: `false`.
+   * Incompatible with `origin: '*'` and `origin: true` — both throw at
+   * construction time, because reflecting credentials to an unrestricted set of
+   * origins lets any site read authenticated responses. Default: `false`.
    */
   credentials?: boolean
 

@@ -329,10 +329,10 @@ export class ScopedApp implements PluginTarget {
    */
   scope(
     subPrefix: string,
-    registrar: (scope: PluginTarget) => void | Promise<void>,
+    registrar: (scope: PluginTarget) => void,
   ): this {
     const child = new ScopedApp(this._app, this._prefix + normalizePrefix(subPrefix))
-    const ret = registrar(child)
+    const ret: unknown = registrar(child)
     if (ret && typeof (ret as Promise<void>).then === 'function') {
       // Best-effort: surface async failures via the returned promise. We can't
       // wait synchronously, so we annotate the chain to mark dirty after the

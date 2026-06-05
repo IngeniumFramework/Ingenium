@@ -63,6 +63,43 @@ export class FakeRedisClient implements RedisClientLike {
     return Promise.resolve(1)
   }
 
+  // --- Queue emulation state -------------------------------------------------
+  // The queue Lua scripts operate on Redis ZSET/HASH/SET/LIST/STRING types that
+  // the simple key/value `store` above can't represent, so we keep dedicated
+  // JS structures keyed by the Redis key name. Single-threaded, so the "atomic"
+  // guarantee of EVAL holds for free.
+  /** pending: ZSET — key -> Map<member, score>. */
+  private readonly zsets = new Map<string, Map<string, number>>()
+  /** jobs: HASH — key -> Map<field, value>. */
+  private readonly hashes = new Map<string, Map<string, string>>()
+  /** inflight: SET — key -> Set<member>. */
+  private readonly sets = new Map<string, Set<string>>()
+  /** failed: LIST — key -> ordered array. */
+  private readonly lists = new Map<string, string[]>()
+  /** seq: STRING counters used by INCR (kept separate from `store`). */
+  private readonly counters = new Map<string, number>()
+
+  private zset(key: string): Map<string, number> {
+    let z = this.zsets.get(key)
+    if (!z) this.zsets.set(key, (z = new Map()))
+    return z
+  }
+  private hash(key: string): Map<string, string> {
+    let h = this.hashes.get(key)
+    if (!h) this.hashes.set(key, (h = new Map()))
+    return h
+  }
+  private getSet(key: string): Set<string> {
+    let s = this.sets.get(key)
+    if (!s) this.sets.set(key, (s = new Set()))
+    return s
+  }
+  private list(key: string): string[] {
+    let l = this.lists.get(key)
+    if (!l) this.lists.set(key, (l = []))
+    return l
+  }
+
   eval(
     script: string,
     options: { keys: readonly string[]; arguments: readonly string[] },
@@ -70,7 +107,110 @@ export class FakeRedisClient implements RedisClientLike {
     if (script.includes('INGENIUM_RATELIMIT_HIT')) {
       return Promise.resolve(this.runRateLimitHit(options.keys, options.arguments))
     }
+    if (script.includes('INGENIUM_QUEUE_')) {
+      return Promise.resolve(this.runQueueScript(script, options.keys, options.arguments))
+    }
     throw new Error(`FakeRedisClient: unrecognized EVAL script:\n${script}`)
+  }
+
+  /**
+   * Emulates the RedisQueueStore Lua scripts. KEYS order matches the real
+   * scripts: [pending(ZSET), jobs(HASH), inflight(SET), failed(LIST), seq].
+   */
+  private runQueueScript(
+    script: string,
+    keys: readonly string[],
+    args: readonly string[],
+  ): unknown {
+    const [pendingK, jobsK, inflightK, failedK, seqK] = keys as [
+      string,
+      string,
+      string,
+      string,
+      string,
+    ]
+    const pending = this.zset(pendingK)
+    const jobs = this.hash(jobsK)
+    const inflight = this.getSet(inflightK)
+    const failed = this.list(failedK)
+
+    // Mirrors the Lua model: `jobs` HASH holds field `<id>` = payload JSON and
+    // field `<id>:a` = attempt integer (so retry is an HINCRBY, not a parse).
+    if (script.includes('INGENIUM_QUEUE_ENQUEUE')) {
+      const score = Number(args[0])
+      const payload = args[1]!
+      const id = String((this.counters.get(seqK) ?? 0) + 1)
+      this.counters.set(seqK, Number(id))
+      jobs.set(id, payload)
+      jobs.set(`${id}:a`, '1')
+      pending.set(id, score)
+      return id
+    }
+
+    if (script.includes('INGENIUM_QUEUE_NEXT')) {
+      const now = Number(args[0])
+      // Lowest score <= now; tie-break by ascending numeric id (FIFO / INCR order).
+      let best: string | null = null
+      let bestScore = Infinity
+      for (const [id, score] of pending) {
+        if (score > now) continue
+        if (
+          best === null ||
+          score < bestScore ||
+          (score === bestScore && Number(id) < Number(best))
+        ) {
+          best = id
+          bestScore = score
+        }
+      }
+      if (best === null) return null
+      pending.delete(best)
+      inflight.add(best)
+      return [best, jobs.get(best) ?? null, jobs.get(`${best}:a`) ?? '1']
+    }
+
+    if (script.includes('INGENIUM_QUEUE_ACK')) {
+      const id = args[0]!
+      inflight.delete(id)
+      jobs.delete(id)
+      jobs.delete(`${id}:a`)
+      return 1
+    }
+
+    if (script.includes('INGENIUM_QUEUE_RETRY')) {
+      const id = args[0]!
+      const readyAt = Number(args[1])
+      if (!inflight.delete(id)) return 0
+      if (!jobs.has(id)) return 0
+      const attempt = Number(jobs.get(`${id}:a`) ?? '1')
+      jobs.set(`${id}:a`, String(attempt + 1))
+      pending.set(id, readyAt)
+      return 1
+    }
+
+    if (script.includes('INGENIUM_QUEUE_FAILED_COUNT')) {
+      return failed.length
+    }
+
+    // NB: check FAILED_COUNT above — 'INGENIUM_QUEUE_FAIL' is a substring of it.
+    if (script.includes('INGENIUM_QUEUE_FAIL ')) {
+      const id = args[0]!
+      if (!inflight.delete(id)) return 0
+      const payload = jobs.get(id)
+      if (payload !== undefined) {
+        const attempt = jobs.get(`${id}:a`) ?? '1'
+        failed.push(`{"id":"${id}","d":${payload},"a":${attempt}}`)
+        jobs.delete(id)
+        jobs.delete(`${id}:a`)
+      }
+      return 1
+    }
+
+    if (script.includes('INGENIUM_QUEUE_SIZE')) {
+      return pending.size
+    }
+
+    throw new Error(`FakeRedisClient: unrecognized QUEUE script:\n${script}`)
   }
 
   private runRateLimitHit(

@@ -16,6 +16,17 @@
  * (`fc00::/7`) form. Single addresses without `/` match exactly.
  */
 
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
+/**
+ * `trust: true` fully trusts a client-supplied `X-Forwarded-For` header, so any
+ * caller can spoof `ctx.ip`. We warn exactly once (dev only) rather than change
+ * the default, because the boolean form is documented Express-compatible behavior
+ * and silently altering it would break apps that legitimately sit behind a single
+ * trusted reverse proxy.
+ */
+let warnedTrustTrue = false
+
 export type TrustProxy =
   | boolean
   | number
@@ -65,6 +76,17 @@ export function resolveForwarded(
 
   let trustedIp = remoteAddress
   if (typeof trust === 'boolean' && trust === true) {
+    if (IS_DEV && !warnedTrustTrue) {
+      warnedTrustTrue = true
+      try {
+        process.emitWarning(
+          "trustProxy: true fully trusts the client-supplied X-Forwarded-For header, so ctx.ip can be spoofed by any caller. This bypasses IP rate-limits/allowlists and poisons audit logs. For production, set trustProxy to a hop count (e.g. 1) or a CIDR/subnet trust list (e.g. ['loopback', '10.0.0.0/8']) so only your reverse proxy is trusted.",
+          { code: 'INGENIUM_TRUST_PROXY_TRUE' },
+        )
+      } catch {
+        // Worker runtimes can throw on emitWarning; the warning is best-effort.
+      }
+    }
     trustedIp = fullChain[0] ?? remoteAddress
   } else if (typeof trust === 'number') {
     // Skip `trust` hops from the right (the rightmost is the immediate peer).

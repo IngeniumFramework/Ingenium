@@ -7,6 +7,12 @@ import type { Session, SessionCookieOptions, SessionOptions, SessionStore } from
 
 // ───── Constants ────────────────────────────────────────────────────────────
 
+/**
+ * Read once at module load so the dev-only warning branch is dead-code
+ * eliminated in production builds. See `context/context.ts` for the pattern.
+ */
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
 const DEFAULT_COOKIE_NAME = 'ingenium.sid'
 const DEFAULT_MAX_AGE_SECONDS = 60 * 60 * 24 * 7 // 7 days
 /** ID byte length — 18 bytes → 24 base64url chars, ~144 bits of entropy. */
@@ -248,8 +254,10 @@ class SessionImpl implements Session {
  * - HMAC-SHA-256 over the session id, base64url-encoded; verified with
  *   `timingSafeEqual`.
  * - 144-bit (18-byte) random ids.
- * - Defaults: `HttpOnly`, `SameSite=Lax`, `Path=/`. Set `secure: true`
- *   behind TLS to enable `Secure`.
+ * - Defaults: `HttpOnly`, `SameSite=Lax`, `Path=/`. `Secure` defaults ON in
+ *   production (`NODE_ENV==='production'`) and OFF in dev so http://localhost
+ *   keeps working; set `cookie.secure: false` to force it off in production
+ *   (a dev warning fires), or `true` to force it on everywhere.
  * - Tampered or unknown cookies silently issue a fresh session — never an
  *   error response, since this is an attacker-influenced surface.
  */
@@ -265,8 +273,33 @@ export function sessionMiddleware(opts: SessionOptions): IngeniumMiddleware {
   const cookieName = opts.cookieName ?? DEFAULT_COOKIE_NAME
   const maxAgeSeconds = opts.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS
   const rolling = opts.rolling ?? false
-  const cookieOpts: SessionCookieOptions = opts.cookie ?? {}
+  const baseCookieOpts: SessionCookieOptions = opts.cookie ?? {}
   const store: SessionStore = opts.store ?? new MemoryStore()
+
+  // Safe-by-default `Secure`: when the caller didn't say either way, enable it
+  // outside dev so a session cookie can't ride a plaintext-HTTP request and be
+  // sniffed. An explicit `secure: false` still wins — that's the escape hatch
+  // for serving over http in local/dev environments. We resolve this once and
+  // bake it into the cookie options so every Set-Cookie below is consistent.
+  const resolvedSecure = baseCookieOpts.secure ?? !IS_DEV
+  const cookieOpts: SessionCookieOptions = { ...baseCookieOpts, secure: resolvedSecure }
+
+  // In production, a session cookie without `Secure` is a real exposure; surface
+  // it loudly but exactly once. The IS_DEV gate is inverted here on purpose —
+  // we only care about the missing flag when NOT in dev.
+  if (!IS_DEV && resolvedSecure === false) {
+    try {
+      process.emitWarning(
+        'ingenium: sessionMiddleware is issuing a session cookie WITHOUT the Secure ' +
+          'attribute in production (cookie.secure === false). The cookie can be sent ' +
+          'over plaintext HTTP and intercepted. Remove `cookie.secure: false` to use ' +
+          'the safe production default, or terminate TLS in front of the app.',
+        { type: 'IngeniumSessionInsecureCookieWarning' },
+      )
+    } catch {
+      /* worker contexts may throw on emitWarning */
+    }
+  }
 
   return async (ctx, next) => {
     const cookies = parseCookieHeader(ctx.headers.cookie as string | undefined)

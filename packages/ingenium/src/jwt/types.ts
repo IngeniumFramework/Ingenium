@@ -44,6 +44,7 @@ export type JwtVerifyError =
   | { error: 'unsupported_alg' }
   | { error: 'bad_signature' }
   | { error: 'expired' }
+  | { error: 'missing_exp' }
   | { error: 'not_yet_valid' }
   | { error: 'too_old' }
   | { error: 'aud_mismatch' }
@@ -107,6 +108,17 @@ export interface JwtOptions<T = Record<string, unknown>> {
   maxAgeSeconds?: number
   /** Leeway for `nbf` / `exp` checks, in seconds. Default `5`. */
   clockSkewSeconds?: number
+  /**
+   * Require a numeric `exp` claim. Default `true`.
+   *
+   * Why default-on: a token that omits `exp` (or carries a non-numeric one)
+   * would otherwise verify forever — a stolen token never stops working. We
+   * refuse those by default and only relax it for callers who deliberately
+   * issue non-expiring tokens (set this to `false`). Either way a present
+   * `exp`/`nbf`/`iat` that is not a finite number is treated as malformed, not
+   * silently skipped.
+   */
+  requireExp?: boolean
   /**
    * If `true` (default), missing tokens raise `IngeniumUnauthorizedError`.
    * If `false`, missing tokens just call `next()` with no `ctx.jwt`.

@@ -239,8 +239,14 @@ export class IngeniumQueue<TData = unknown> {
       }
     } finally {
       this.active--
-      // Try to immediately fill the slot we just freed.
-      this.pump()
+      // Refill the freed slot on the next macrotask, not synchronously. A
+      // synchronous refill would chain pickup of the *next* job into the same
+      // microtask run as this job's completion, so the pool would never be
+      // observably idle between jobs (active would dip and immediately rise
+      // within one turn). Deferring to setImmediate yields a macrotask
+      // boundary where `active` reflects only genuinely-running jobs.
+      const t = setImmediate(() => this.pump())
+      t.unref?.()
     }
   }
 

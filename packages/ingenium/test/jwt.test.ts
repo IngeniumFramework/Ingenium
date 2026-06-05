@@ -35,7 +35,11 @@ function signTestJwt(
 ): string {
   const header = { alg, typ: 'JWT', ...headerOverrides }
   const headerB64 = b64url(JSON.stringify(header))
-  const payloadB64 = b64url(JSON.stringify(payload))
+  // verifyJwt now requires `exp` by default (requireExp). Tests that don't care
+  // about expiry get a valid far-future exp so they keep exercising their actual
+  // concern; tests asserting expiry/nbf still pass their own explicit exp.
+  const withExp = 'exp' in payload ? payload : { ...payload, exp: nowSec() + 60 }
+  const payloadB64 = b64url(JSON.stringify(withExp))
   const signingInput = `${headerB64}.${payloadB64}`
   const digest = ALG_DIGEST[alg]
   if (!digest) throw new Error(`signTestJwt: HMAC-only helper, got ${alg}`)

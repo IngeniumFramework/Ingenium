@@ -83,6 +83,16 @@ export interface PluginTarget {
   options(path: string, handler: IngeniumHandler): this
   options(path: string, ...args: [...IngeniumMiddleware[], IngeniumHandler]): this
 
+  /**
+   * Pre-handler / post-handler middleware (paths are relative to this target).
+   * Inside a `ScopedApp` these are confined to the scope prefix — `s.before(h)`
+   * only fires for requests under the scope, mirroring `s.use`.
+   */
+  before(handler: IngeniumMiddleware): this
+  before(pattern: string, handler: IngeniumMiddleware): this
+  after(handler: IngeniumMiddleware): this
+  after(pattern: string, handler: IngeniumMiddleware): this
+
   /** Decorator registration. NOTE: GLOBAL even when called inside a scope. */
   decorate<T>(name: string, factory: LazyDecorator<T>): this
   decorateRequest<T>(name: string, factory: EagerDecorator<T>): this
@@ -98,7 +108,7 @@ export interface PluginTarget {
    * Open a nested registration scope. All registrations inside `registrar`
    * are prefix-relative to `prefix` (and inherit any outer scope prefix).
    */
-  scope(prefix: string, registrar: (scope: PluginTarget) => void | Promise<void>): this | Promise<this>
+  scope(prefix: string, registrar: (scope: PluginTarget) => void): this | Promise<this>
 }
 
 /**

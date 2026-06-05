@@ -24,7 +24,12 @@ export interface CsrfCookieOptions {
   domain?: string
   /** SameSite policy. Default `'lax'`. */
   sameSite?: 'lax' | 'strict' | 'none'
-  /** Mark cookie Secure. Default `false`; set `true` behind TLS. */
+  /**
+   * Mark cookie Secure. **Default `true`** so the CSRF cookie is never sent
+   * over plaintext HTTP where a network attacker could read it and forge the
+   * double-submit header. Override to `false` only for local HTTP development;
+   * doing so emits a dev-mode warning.
+   */
   secure?: boolean
   /**
    * Mark cookie HttpOnly. **Default `false`** — clients must read the cookie
@@ -48,6 +53,22 @@ export interface CsrfOptions {
   storage?: CsrfStorage
   /** Cookie options when `storage === 'cookie'`. */
   cookie?: CsrfCookieOptions
+  /**
+   * Bind a cookie-mode token to a per-session/per-user identifier (e.g. a
+   * session id or authenticated user id derived from `ctx`).
+   *
+   * Without binding, a signed double-submit token is only proven to have been
+   * minted by *this server* — any token the server ever issued is globally
+   * valid for any user, so a leaked or shared token defeats the protection.
+   * When this returns a stable value, the token is HMAC'd over
+   * `raw + '.' + binding` and the binding is re-verified on unsafe requests,
+   * so a token minted for one session cannot be replayed against another.
+   *
+   * Returning `undefined` (e.g. before login) falls back to plain
+   * double-submit and emits a dev-mode warning. Has no effect in session
+   * storage mode, where the session id already authenticates the binding.
+   */
+  sessionBinding?: (ctx: IngeniumContext) => string | undefined
   /** Methods that bypass validation. Default `['GET', 'HEAD', 'OPTIONS', 'TRACE']`. */
   ignoreMethods?: readonly string[]
   /**

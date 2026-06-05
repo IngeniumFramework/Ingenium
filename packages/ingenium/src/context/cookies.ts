@@ -168,7 +168,7 @@ function serializeSetCookie(name: string, value: string, opts: CookieSetOptions)
  * the transport writes multiple `Set-Cookie` lines (per RFC 7230 §3.2.2,
  * `Set-Cookie` is the canonical exception to header-folding rules).
  */
-function appendSetCookie(ctx: IngeniumContext, value: string): void {
+function appendSetCookie(ctx: IngeniumContext<unknown>, value: string): void {
   const existing = ctx.getHeader('set-cookie')
   if (!existing) {
     ctx.set('set-cookie', value)
@@ -221,7 +221,7 @@ function verifySigned(raw: string, secrets: readonly string[]): string | null {
  * happens at sign/verify time (NOT at holder construction) so an app that
  * registers secrets after the holder is allocated still picks them up.
  */
-export function makeIngeniumCookies(ctx: IngeniumContext): IngeniumCookies {
+export function makeIngeniumCookies<Params>(ctx: IngeniumContext<Params>): IngeniumCookies {
   let parsed: Record<string, string> | null = null
 
   const requireSecrets = (): readonly string[] => {
@@ -268,7 +268,10 @@ export function makeIngeniumCookies(ctx: IngeniumContext): IngeniumCookies {
       appendSetCookie(
         ctx,
         serializeSetCookie(name, '', {
-          domain: opts?.domain,
+          // exactOptionalPropertyTypes: only include `domain` when the caller
+          // actually supplied one — an explicit `undefined` isn't assignable to
+          // the optional `domain?: string` field.
+          ...(opts?.domain !== undefined ? { domain: opts.domain } : {}),
           path: opts?.path ?? '/',
           maxAge: 0,
           expires: new Date(0),

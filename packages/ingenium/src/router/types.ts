@@ -16,8 +16,13 @@ export const HTTP_METHODS: readonly HttpMethod[] = [
  *
  * - `:name`           → required string
  * - `:name?`          → optional string (becomes `string | undefined`)
- * - `:name(regex)`    → required string (regex is type-stripped; runtime
- *                       does not yet enforce the constraint)
+ * - `:name(regex)`    → required string. The regex is type-stripped here, but
+ *                       the constraint IS enforced at runtime by the trie
+ *                       (`RouterTrie.find` tests the segment against the
+ *                       compiled, fully-anchored pattern), so the `string`
+ *                       type is honest about the matched shape.
+ *                       Note: number-narrowing (typing `:id(\d+)` as `number`)
+ *                       remains deferred — constrained params stay `string`.
  * - `*name`           → required string (greedy wildcard tail)
  *
  * @example

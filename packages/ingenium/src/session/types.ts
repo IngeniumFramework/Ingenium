@@ -15,7 +15,20 @@ export interface SessionCookieOptions {
   httpOnly?: boolean
   /** Cookie `SameSite` attribute. @default 'lax' */
   sameSite?: 'lax' | 'strict' | 'none'
-  /** Cookie `Secure` attribute. @default false */
+  /**
+   * Cookie `Secure` attribute.
+   *
+   * When left undefined, {@link sessionMiddleware} resolves it safely: ON in
+   * production (`NODE_ENV==='production'`) so the cookie cannot ride plaintext
+   * HTTP, OFF in dev so `http://localhost` keeps working. Set `false`
+   * explicitly to opt out in production (emits a dev warning), or `true` to
+   * force it on in every environment.
+   *
+   * Note: the raw {@link serializeCookie} helper still treats `undefined` as
+   * off — only the middleware applies the environment-aware default.
+   *
+   * @default undefined (production → Secure, dev → not Secure)
+   */
   secure?: boolean
 }
 

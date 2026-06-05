@@ -56,7 +56,7 @@ app.compose(): void                       // explicit pre-warm; auto-runs lazily
 app.handle(ctx: IngeniumContext): Promise<void>  // dispatch entry, used by adapters
 app.listen(port: number, host?: string): Promise<{ port: number; close: () => Promise<void> }>
 app.inject(req: InjectRequest): Promise<InjectResponse>  // in-process test client (no socket)
-app.scope(prefix: string, register: (scope: ScopedApp) => void | Promise<void>): this  // plugin/middleware scoping
+app.scope(prefix: string, register: (scope: ScopedApp) => void): this  // plugin/middleware scoping (before/after/use/routes confined to prefix)
 
 // Built-in middleware (no install required):
 ingenium.json(opts?:    { limit?: number }): IngeniumMiddleware     // sets ctx.body parsing default

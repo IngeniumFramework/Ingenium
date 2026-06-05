@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { Buffer } from 'node:buffer'
-import { IngeniumError } from '../errors.ts'
+import { IngeniumError, IngeniumHeaderInjectionError } from '../errors.ts'
 import type { IngeniumMiddleware } from '../middleware/types.ts'
 import type { IngeniumContext } from '../context/context.ts'
 import type { CsrfCookieOptions, CsrfOptions, CsrfValueReader } from './types.ts'
@@ -11,6 +11,11 @@ export class IngeniumCsrfError extends IngeniumError {
     super(403, 'CSRF_FAILED', message)
   }
 }
+
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
+/** CR/LF detector — config-supplied cookie attributes must not inject headers. */
+const CRLF_RE = /[\r\n]/
 
 const TOKEN_BYTES = 18
 const SAFE_METHODS_DEFAULT: readonly string[] = ['GET', 'HEAD', 'OPTIONS', 'TRACE']
@@ -24,6 +29,7 @@ interface ResolvedOptions {
   ignoreMethods: Set<string>
   value: CsrfValueReader
   skip: ((ctx: IngeniumContext) => boolean | Promise<boolean>) | null
+  sessionBinding: ((ctx: IngeniumContext) => string | undefined) | null
 }
 
 /**
@@ -55,11 +61,34 @@ export function csrfMiddleware(opts: CsrfOptions = {}): IngeniumMiddleware {
       return
     }
 
+    // Per-session binding (cookie mode only). When present, the token's
+    // signature covers this value so a token minted for one session can't be
+    // replayed against another. `undefined` falls back to plain double-submit.
+    const binding =
+      resolved.storage === 'cookie' && resolved.sessionBinding
+        ? resolved.sessionBinding(ctx)
+        : undefined
+    if (
+      IS_DEV &&
+      resolved.storage === 'cookie' &&
+      resolved.secrets.length > 0 &&
+      binding === undefined
+    ) {
+      try {
+        process.emitWarning(
+          'csrfMiddleware: cookie-mode token has no session binding. Double-submit without binding assumes no XSS and a strict SameSite cookie — any token the server mints is globally valid. Provide `sessionBinding` to tie the token to a session/user.',
+          { type: 'IngeniumCsrfUnboundTokenWarning' },
+        )
+      } catch {
+        // process.emitWarning can throw in unusual runtimes (workers); swallow.
+      }
+    }
+
     // Resolve / mint the expected token for this request.
-    let expected = readExpectedToken(ctx, resolved)
+    let expected = readExpectedToken(ctx, resolved, binding)
     let mintedThisRequest = false
     if (!expected) {
-      expected = mintToken(resolved)
+      expected = mintToken(resolved, binding)
       mintedThisRequest = true
     }
 
@@ -88,16 +117,26 @@ export function csrfMiddleware(opts: CsrfOptions = {}): IngeniumMiddleware {
 
 // ───── Token mint / verify ─────────────────────────────────────────────────
 
-function mintToken(opts: ResolvedOptions): string {
+function mintToken(opts: ResolvedOptions, binding: string | undefined): string {
   const raw = randomBytes(TOKEN_BYTES).toString('base64url')
   if (opts.storage === 'session' || opts.secrets.length === 0) return raw
   // Signed for double-submit so a forged cookie value can't pass verification.
-  const sig = signToken(raw, opts.secrets[0]!)
+  // When a binding is present it's folded into the signature so the token is
+  // only valid for the session/user it was minted for.
+  const sig = signToken(raw, opts.secrets[0]!, binding)
   return `${raw}.${sig}`
 }
 
-function signToken(raw: string, secret: string): string {
-  return createHmac('sha256', secret).update(raw).digest('base64url')
+/**
+ * HMAC the token body. The binding (when present) is mixed into the signed
+ * message so the same `raw` value produces a different signature per session —
+ * a token can't be lifted from one user's cookie and replayed by another.
+ * The binding is never stored in the token; it's re-derived from the request
+ * at verify time, so it doesn't leak the session id to the client.
+ */
+function signToken(raw: string, secret: string, binding?: string | undefined): string {
+  const message = binding === undefined ? raw : `${raw}.${binding}`
+  return createHmac('sha256', secret).update(message).digest('base64url')
 }
 
 function tokenMatches(submitted: string, expected: string): boolean {
@@ -108,13 +147,17 @@ function tokenMatches(submitted: string, expected: string): boolean {
   return timingSafeEqual(a, b)
 }
 
-function verifySignedToken(token: string, secrets: readonly string[]): boolean {
+function verifySignedToken(
+  token: string,
+  secrets: readonly string[],
+  binding: string | undefined,
+): boolean {
   const dot = token.lastIndexOf('.')
   if (dot <= 0) return false
   const raw = token.slice(0, dot)
   const sig = token.slice(dot + 1)
   for (const secret of secrets) {
-    const expected = signToken(raw, secret)
+    const expected = signToken(raw, secret, binding)
     if (expected.length !== sig.length) continue
     if (timingSafeEqual(Buffer.from(expected), Buffer.from(sig))) return true
   }
@@ -123,12 +166,19 @@ function verifySignedToken(token: string, secrets: readonly string[]): boolean {
 
 // ───── Storage ─────────────────────────────────────────────────────────────
 
-function readExpectedToken(ctx: IngeniumContext, opts: ResolvedOptions): string | null {
+function readExpectedToken(
+  ctx: IngeniumContext,
+  opts: ResolvedOptions,
+  binding: string | undefined,
+): string | null {
   if (opts.storage === 'cookie') {
     const cookies = parseCookies(ctx.headers['cookie'])
     const token = cookies[opts.cookie.name]
     if (!token) return null
-    if (opts.secrets.length > 0 && !verifySignedToken(token, opts.secrets)) return null
+    // Verify against the current request's binding: a token signed for another
+    // session won't match this request's binding and is rejected here, forcing
+    // a fresh mint rather than silently trusting a cross-session token.
+    if (opts.secrets.length > 0 && !verifySignedToken(token, opts.secrets, binding)) return null
     return token
   }
   // Session storage
@@ -161,6 +211,13 @@ function writeSession(ctx: IngeniumContext, token: string): void {
 }
 
 function appendSetCookie(ctx: IngeniumContext, value: string): void {
+  // This write goes straight to the header bag, bypassing ctx.set's guard, so
+  // re-assert the same CR/LF check here on the fully-composed value.
+  if (CRLF_RE.test(value)) {
+    throw new IngeniumHeaderInjectionError(
+      'csrfMiddleware: Set-Cookie value contains CR/LF (possible header injection)',
+    )
+  }
   const existing = ctx._headers['set-cookie']
   if (!existing) {
     ctx._headers['set-cookie'] = [value]
@@ -205,13 +262,41 @@ function resolveOptions(opts: CsrfOptions): ResolvedOptions {
     path: opts.cookie?.path ?? '/',
     domain: opts.cookie?.domain ?? '',
     sameSite: opts.cookie?.sameSite ?? 'lax',
-    secure: opts.cookie?.secure ?? false,
+    // Secure-by-default: a plaintext CSRF cookie is readable by a network
+    // attacker, who can then forge the double-submit header.
+    secure: opts.cookie?.secure ?? true,
     httpOnly: opts.cookie?.httpOnly ?? false,
     maxAgeSeconds: opts.cookie?.maxAgeSeconds ?? 7 * 24 * 60 * 60,
   }
+  // Config-supplied cookie attributes are interpolated raw into Set-Cookie;
+  // reject CR/LF here so they can't bypass the framework's header-injection
+  // guard (which the rest of the framework enforces via ctx.set).
+  if (CRLF_RE.test(cookie.path) || CRLF_RE.test(cookie.domain) || CRLF_RE.test(cookie.name)) {
+    throw new IngeniumHeaderInjectionError(
+      'csrfMiddleware: cookie name/path/domain contains CR/LF (possible header injection)',
+    )
+  }
+  if (storage === 'cookie' && cookie.secure === false && IS_DEV) {
+    try {
+      process.emitWarning(
+        'csrfMiddleware: CSRF cookie issued with Secure=false — the token is sent over plaintext HTTP and can be read by a network attacker. Only disable Secure for local HTTP development.',
+        { type: 'IngeniumCsrfInsecureCookieWarning' },
+      )
+    } catch {
+      // process.emitWarning can throw in unusual runtimes (workers); swallow.
+    }
+  }
   const ignoreMethods = new Set((opts.ignoreMethods ?? SAFE_METHODS_DEFAULT).map((m) => m.toUpperCase()))
   const value = opts.value ?? defaultValueReader
-  return { secrets, storage, cookie, ignoreMethods, value, skip: opts.skip ?? null }
+  return {
+    secrets,
+    storage,
+    cookie,
+    ignoreMethods,
+    value,
+    skip: opts.skip ?? null,
+    sessionBinding: opts.sessionBinding ?? null,
+  }
 }
 
 const defaultValueReader: CsrfValueReader = (ctx) => {

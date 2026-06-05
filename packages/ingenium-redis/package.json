@@ -1,19 +1,28 @@
 {
   "name": "ingenium-redis",
-  "version": "0.0.1",
-  "description": "Redis-backed session, idempotency, and rate-limit stores for Ingenium. Drop-in replacements for the in-memory defaults; required for multi-instance deployments.",
+  "version": "0.0.2",
+  "description": "Redis-backed session, idempotency, rate-limit, and background-job queue stores for Ingenium. Drop-in replacements for the in-memory defaults; required for multi-instance deployments.",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.ts",
-      "import": "./src/index.ts"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
     }
   },
-  "files": ["src"],
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
   "scripts": {
+    "build": "tsup",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
   },
   "engines": {
     "node": ">=20.0.0"
@@ -23,6 +32,9 @@
     "session",
     "idempotency",
     "rate-limit",
+    "queue",
+    "jobs",
+    "background-jobs",
     "ingenium",
     "multi-instance"
   ],
@@ -31,7 +43,9 @@
     "ingenium": "*"
   },
   "peerDependenciesMeta": {
-    "ingenium": { "optional": false }
+    "ingenium": {
+      "optional": false
+    }
   },
   "devDependencies": {
     "vitest": "^2.0.0"

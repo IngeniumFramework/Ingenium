@@ -20,10 +20,23 @@ with a methodology that is at least defensible as a *local regression detector*.
 4. **Four frameworks compared.** Express, Fastify, Hono, and Ingenium.
    Comparing only against Express makes any "win" trivial; including Fastify
    and Hono prevents that.
-5. **Frameworks pinned at the versions in `benchmarks/package.json`.** v1
-   would silently drift if Express minor-bumped. v2 still does technically
-   (semver `^`), but the pinning intent is documented and a frozen lockfile
-   should be committed if you publish numbers.
+5. **Frameworks pinned at EXACT versions in `benchmarks/package.json`.** v1
+   would silently drift if Express minor-bumped. v2 dependencies are now pinned
+   with no `^`/`~` (see the `//competitor-pins` note in `package.json`): a silent
+   minor bump of a competitor would shift the baseline and make a regression
+   indistinguishable from an upstream change. Comparative numbers are only
+   meaningful against pinned deps. Bump competitor versions deliberately, in
+   their own commit, so the version delta is reviewable alongside any movement.
+6. **Server RSS reported per framework.** The table includes a `server RSS (MB)`
+   column. The runner samples the SERVER child process's resident set size via
+   `ps -o rss= -p <pid>` at steady state (right after the last autocannon
+   sample, before SIGTERM). Because each framework runs in its own child
+   process, this is the framework-under-test's memory — not the harness's — so
+   it is comparable across the matrix. It is best-effort: on any failure (no
+   `ps`, Windows, race with process exit) the cell prints `n/a` and the run is
+   not failed. RSS is a coarse signal — it reflects V8 heap + native + GC
+   timing, not steady-state working set — so treat it the same way as the
+   throughput numbers: a regression detector, not a publishable claim.
 
 ## What v2 still does NOT do
 
@@ -60,7 +73,26 @@ npm run bench:v2
 npm run bench:hello-v2
 npm run bench:body-v2
 npm run bench:middleware-v2
+npm run bench:payload-1kb-v2
+npm run bench:payload-100kb-v2
 ```
+
+## Scenarios
+
+| Scenario      | Shape                                              |
+| ------------- | -------------------------------------------------- |
+| `hello`       | `GET /` returning a tiny JSON object.              |
+| `body`        | `POST /echo` echoing a small JSON body.            |
+| `middleware`  | `GET /` through 10 middleware layers.              |
+| `payload-1kb` | `POST /echo` echoing a deterministic ~1KB JSON body.   |
+| `payload-100kb` | `POST /echo` echoing a deterministic ~100KB JSON body. |
+
+The payload scenarios build their request bodies in-process from a fixed seed
+(`_servers/_payload.ts`) — no fixture file is committed. The builder repeats a
+known record until the serialized JSON crosses the target byte size, so every
+framework echoes byte-identical bytes and the only variable is the framework.
+The actual byte size (always slightly over the target, e.g. ~1087 / ~102443
+bytes) is printed before each run.
 
 ## Server contract
 

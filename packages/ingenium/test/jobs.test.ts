@@ -12,15 +12,23 @@ function flush(n = 5): Promise<void> {
 }
 
 /**
- * Wait until `predicate()` returns true, polling once per macrotask. Aborts
- * after `maxTurns` so a stuck test fails loudly instead of hanging the suite.
+ * Wait until `predicate()` returns true, polling once per macrotask up to a
+ * wall-clock budget. The budget is in milliseconds, NOT macrotask turns:
+ * backoff/retry assertions depend on real elapsed time (a 60ms retry delay
+ * spans thousands of `setImmediate` turns, so a turn-count budget would give
+ * up in ~7ms — long before the timer fires — and fail spuriously on fast
+ * machines). Aborts after `timeoutMs` so a stuck test fails loudly instead of
+ * hanging the suite.
  */
-async function waitFor(predicate: () => boolean, maxTurns = 200): Promise<void> {
-  for (let i = 0; i < maxTurns; i++) {
+async function waitFor(predicate: () => boolean, timeoutMs = 2000): Promise<void> {
+  const start = Date.now()
+  for (;;) {
     if (predicate()) return
+    if (Date.now() - start > timeoutMs) {
+      throw new Error('waitFor: predicate never became true')
+    }
     await new Promise<void>((r) => setImmediate(r))
   }
-  throw new Error('waitFor: predicate never became true')
 }
 
 describe('IngeniumQueue (in-memory)', () => {
@@ -302,8 +310,16 @@ describe('IngeniumQueue (in-memory)', () => {
     await waitFor(() => release !== null)
     // One in-flight + two pending.
     expect(await q.size()).toBe(2)
+    // Release the in-flight job; it acks and the next pending job is picked
+    // up, so the pending count drops from 2 to 1.
     release!()
-    await waitFor(() => release === null || (release as unknown) === null, 5)
+    let pending = await q.size()
+    const start = Date.now()
+    while (pending !== 1 && Date.now() - start < 2000) {
+      await new Promise<void>((r) => setImmediate(r))
+      pending = await q.size()
+    }
+    expect(pending).toBe(1)
   })
 
   it('exponential backoff delays the retry', async () => {

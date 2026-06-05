@@ -343,14 +343,25 @@ describe('Http2cAdapter — maxRequestBytes', () => {
   })
 
   it('rejects immediately on oversized Content-Length', async () => {
+    // The declared `content-length` MUST match the bytes actually sent: Node's
+    // HTTP/2 *client* strictly enforces content-length and self-RSTs the stream
+    // (ERR_HTTP2_STREAM_ERROR, before any response is exchanged) if you declare
+    // N bytes but send fewer. So we cannot probe "header says too big" with a
+    // 1-byte body — the client kills the request on its own side. Instead we
+    // send a 600 KiB body whose length equals the declared, oversized length.
+    // The server's header pre-check (`rejectH2IfContentLengthTooBig`) still
+    // fires on the headers and 413s WITHOUT buffering the body: the handler caps
+    // at 10 MiB, so a buffered 600 KiB body would echo back 200 — getting 413
+    // proves the reject happened on the Content-Length header, pre-buffer.
+    const oversized = 600_000 // > the 500_000 ceiling
     const res = await h2request(
       client,
       {
         [h2.HTTP2_HEADER_METHOD]: 'POST',
         [h2.HTTP2_HEADER_PATH]: '/echo',
-        'content-length': String(5 * MIB),
+        'content-length': String(oversized),
       },
-      Buffer.from('x'),
+      Buffer.alloc(oversized, 0x78),
     )
     expect(res.status).toBe(413)
     const parsed = JSON.parse(res.body.toString('utf8'))

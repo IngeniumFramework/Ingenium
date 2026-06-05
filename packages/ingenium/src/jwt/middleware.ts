@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer'
 import type { KeyObject } from 'node:crypto'
-import { IngeniumUnauthorizedError } from '../errors.ts'
+import { IngeniumError, IngeniumUnauthorizedError } from '../errors.ts'
 import type { IngeniumMiddleware } from '../middleware/types.ts'
 import type { IngeniumContext } from '../context/context.ts'
 import type {
@@ -17,6 +17,10 @@ import { verifyJwt, type KidTaggedKey, type VerifyKeyMaterial } from './verify.t
 import { fetchJwks } from './jwks.ts'
 
 const DEFAULT_ALGORITHMS: readonly JwtAlgorithm[] = ['HS256']
+// When the caller wires up JWKS (always asymmetric) but doesn't pin an
+// algorithm, defaulting to the HMAC `HS256` would be a footgun — fall back to
+// the most common asymmetric default instead.
+const DEFAULT_ASYMMETRIC_ALGORITHMS: readonly JwtAlgorithm[] = ['RS256']
 const DEFAULT_JWKS_TTL_MS = 10 * 60 * 1000
 const SUPPORTED: ReadonlySet<JwtAlgorithm> = new Set([
   'HS256', 'HS384', 'HS512',
@@ -24,6 +28,25 @@ const SUPPORTED: ReadonlySet<JwtAlgorithm> = new Set([
   'PS256', 'PS384', 'PS512',
   'ES256', 'ES384', 'ES512',
 ])
+
+/**
+ * 500 — the configured algorithm allowlist and the supplied key material are
+ * from different families (an HMAC alg paired with an asymmetric PEM / public
+ * key, or vice versa). Allowing this is the canonical algorithm-confusion
+ * footgun: an attacker forges `HS256` tokens using the server's *public* key
+ * as the HMAC secret. We refuse the configuration at construction time so the
+ * mistake surfaces at boot, not as a silent auth bypass.
+ */
+export class IngeniumJwtKeyAlgMismatchError extends IngeniumError {
+  constructor(message: string) {
+    super(500, 'JWT_KEY_ALG_MISMATCH', message)
+  }
+}
+
+/** True for the HMAC (symmetric) algorithm family. */
+function isHmacAlg(alg: JwtAlgorithm): boolean {
+  return alg === 'HS256' || alg === 'HS384' || alg === 'HS512'
+}
 
 /** Default token reader — `Authorization: Bearer <token>`. */
 const defaultGetToken: JwtTokenReader = (ctx) => {
@@ -102,7 +125,13 @@ export function jwtMiddleware<T = Record<string, unknown>>(
     }
   }
 
-  const algorithms = (opts.algorithms ?? DEFAULT_ALGORITHMS).slice() as JwtAlgorithm[]
+  // Algorithm defaulting is family-aware. The historical `HS256` default is
+  // only safe for symmetric (string-secret) setups; when the caller leans on
+  // JWKS (always asymmetric) without pinning an algorithm, defaulting to an
+  // HMAC alg would silently invite the key-confusion bypass. In that case we
+  // default to `RS256` instead so the families can never disagree by accident.
+  const defaultAlgorithms = hasJwks ? DEFAULT_ASYMMETRIC_ALGORITHMS : DEFAULT_ALGORITHMS
+  const algorithms = (opts.algorithms ?? defaultAlgorithms).slice() as JwtAlgorithm[]
   if (algorithms.length === 0) {
     throw new Error('jwtMiddleware: `algorithms` must contain at least one algorithm')
   }
@@ -118,6 +147,7 @@ export function jwtMiddleware<T = Record<string, unknown>>(
 
   const required = opts.required ?? true
   const clockSkewSeconds = opts.clockSkewSeconds ?? 5
+  const requireExp = opts.requireExp ?? true
   const jwksCacheMs = opts.jwksCacheMs ?? DEFAULT_JWKS_TTL_MS
   const jwksUrl = hasJwks ? opts.jwksUrl! : null
   const getToken = opts.getToken ?? defaultGetToken
@@ -132,6 +162,26 @@ export function jwtMiddleware<T = Record<string, unknown>>(
     typeof opts.secret === 'function'
       ? (opts.secret as JwtSecretResolver<T>)
       : null
+
+  // ── Key/algorithm family confinement ─────────────────────────────────────
+  // If the allowlist contains an HMAC alg, none of the STATIC key material may
+  // be asymmetric (a PEM string/Buffer or a public/private KeyObject). Pairing
+  // those is the algorithm-confusion bypass: an attacker forges `HS256` tokens
+  // using the asymmetric *public* key as the HMAC secret. Refuse at boot.
+  // (A function resolver / JWKS is checked per-request by the verifier, which
+  // never runs HMAC against an asymmetric key.)
+  if (algorithms.some(isHmacAlg)) {
+    for (const k of staticKeys) {
+      if (staticKeyIsAsymmetric(k)) {
+        throw new IngeniumJwtKeyAlgMismatchError(
+          'jwtMiddleware: an HMAC algorithm (HS256/384/512) was paired with an ' +
+            'asymmetric key (PEM or public/private KeyObject). This enables an ' +
+            'algorithm-confusion forgery — use an asymmetric algorithm (RS*/PS*/ES*) ' +
+            'for asymmetric keys, or a raw shared secret for HMAC.',
+        )
+      }
+    }
+  }
 
   return async (ctx, next) => {
     const token = await getToken(ctx)
@@ -171,7 +221,7 @@ export function jwtMiddleware<T = Record<string, unknown>>(
     }
 
     // Build VerifyOptions without spreading undefined keys (exactOptionalPropertyTypes).
-    const verifyOpts: Parameters<typeof verifyJwt>[2] = { algorithms, clockSkewSeconds }
+    const verifyOpts: Parameters<typeof verifyJwt>[2] = { algorithms, clockSkewSeconds, requireExp }
     if (opts.audience !== undefined) verifyOpts.audience = opts.audience
     if (opts.issuer !== undefined) verifyOpts.issuer = opts.issuer
     if (opts.maxAgeSeconds !== undefined) verifyOpts.maxAgeSeconds = opts.maxAgeSeconds
@@ -228,6 +278,27 @@ function coerceJwtKey(k: JwtKey): VerifyKeyMaterial | KidTaggedKey {
     if (Buffer.isBuffer(key) || isKeyObject(key)) return { kid: k.kid, key }
   }
   throw new Error('jwtMiddleware: invalid `secret` entry — expected string, Buffer, KeyObject, or { kid, key }')
+}
+
+/**
+ * Classify a normalised static key as asymmetric (PEM blob or a public/private
+ * KeyObject). Used by the construction-time family guard — a `kid`-tagged entry
+ * is inspected by its inner `key`.
+ */
+function staticKeyIsAsymmetric(entry: VerifyKeyMaterial | KidTaggedKey): boolean {
+  const key: VerifyKeyMaterial =
+    typeof entry === 'object' && entry !== null && !Buffer.isBuffer(entry) && 'key' in entry
+      ? (entry as KidTaggedKey).key
+      : (entry as VerifyKeyMaterial)
+  if (typeof key === 'string') return looksLikePem(key)
+  if (Buffer.isBuffer(key)) return looksLikePem(key.toString('latin1'))
+  // KeyObject: 'public' / 'private' are asymmetric; 'secret' is HMAC-eligible.
+  return (key as KeyObject).type === 'public' || (key as KeyObject).type === 'private'
+}
+
+/** A PEM-armored blob is asymmetric key material, never an HMAC secret. */
+function looksLikePem(s: string): boolean {
+  return s.trimStart().startsWith('-----BEGIN')
 }
 
 function isKeyObject(v: unknown): v is KeyObject {

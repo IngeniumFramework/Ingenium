@@ -7,6 +7,12 @@ import {
 import type { ProblemDetails, ResolvedProblemDetailsOptions } from './types.ts'
 
 /**
+ * Read once at module load so V8 dead-code-eliminates the dev-only branch in
+ * production builds. See CLAUDE.md "Dev-mode diagnostics" rule.
+ */
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
+/**
  * Maps known framework error codes to short, human-readable titles. Falls
  * back to the standard HTTP reason phrase, then to the error's own message.
  */
@@ -101,13 +107,23 @@ export function toProblemDetails(
     return problem
   }
 
-  // Unknown error — generic 500.
+  // Unknown error — generic 500. Unlike IngeniumError (whose `message` is
+  // developer-authored and safe to surface), an arbitrary thrown value's
+  // message can leak internal infrastructure detail (DB DSNs with hostnames /
+  // credentials, file paths, driver internals). In production we therefore
+  // replace it with a generic phrase and only expose the raw message in dev or
+  // when the explicit `includeStack` debug opt-in is enabled.
+  const exposeMessage = IS_DEV || opts.includeStack
   const message = (err as Error)?.message
+  const detail =
+    exposeMessage && typeof message === 'string' && message.length > 0
+      ? message
+      : 'Internal Server Error'
   const problem: ProblemDetails = {
     type: 'about:blank',
     title: STATUS_REASON[500]!,
     status: 500,
-    detail: typeof message === 'string' && message.length > 0 ? message : 'Internal Server Error',
+    detail,
   }
 
   const instance = opts.instance(ctx)

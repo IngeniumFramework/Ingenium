@@ -41,6 +41,8 @@ import type {
 export type {
   WebSocketHandler,
   WebSocketHandlerOptions,
+  WebSocketOriginOption,
+  WebSocketOriginVerifier,
   WsIntegrator,
   WsRegistrar,
   WebSocket,

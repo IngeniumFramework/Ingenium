@@ -54,6 +54,7 @@ Prefix normalization: leading `/` is added if missing, trailing `/` is stripped,
 | `/static` | Literal segment. | n/a |
 | `/:name` | Required named param. Matches one path segment (no `/`). | `params.name: string` |
 | `/:name?` | Optional named param. Matches zero or one segment. | `params.name?: string` |
+| `/:name(regex)` | Constrained param. Matches one segment **only if** it fully matches `regex` (anchored). A non-match falls through to a `*wildcard` sibling, else 404. | `params.name: string` |
 | `/*name` | Greedy wildcard tail. Matches the rest of the path including `/`. | `params.name: string` |
 
 Examples:
@@ -127,4 +128,6 @@ type D = ExtractParams<'/health'>
 // Record<string, never>
 ```
 
-Known limitation: `ExtractParams` does not narrow constrained params. A path like `/users/:id(\\d+)` is still typed as `string`, not `number` — Express-style regex constraints aren't currently parsed at the type level.
+Inline regex constraints (`/users/:id(\\d+)`) are **enforced at runtime** as of v0.1.0 — the segment must fully match the pattern or the route doesn't match (it falls through to a `*wildcard` sibling, else 404). See [ADR 0006](../adr/0006-param-constraints.md). The hot path is unaffected for unconstrained routes (one field load, no regex).
+
+Known limitation: the constrained param value is still typed (and returned) as `string`, not `number`. Type-level narrowing of numeric constraints to `number` (and the matching runtime coercion) is deferred — see the roadmap.

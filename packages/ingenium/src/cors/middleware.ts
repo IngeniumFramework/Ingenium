@@ -1,6 +1,9 @@
 import type { IngeniumMiddleware } from '../middleware/types.ts'
 import type { IngeniumContext } from '../context/context.ts'
 import type { CorsOptions, CorsOrigin } from './types.ts'
+import { IngeniumError } from '../errors.ts'
+
+const IS_DEV = process.env.NODE_ENV !== 'production'
 
 const DEFAULT_METHODS: readonly string[] = [
   'GET',
@@ -52,7 +55,16 @@ async function resolveOrigin(
     return { value: null, reflected: false }
   }
 
-  if (spec === true) return { value: reqOrigin, reflected: true }
+  // `origin: true` reflects whatever the request sends — except the literal
+  // string "null". Browsers send `Origin: null` for sandboxed iframes, `file://`
+  // pages, and redirected/data-URL contexts; reflecting it back hands those
+  // untrusted, un-attributable contexts a same-origin-equivalent grant. It is
+  // only honoured when an explicit allowlist array opts into it (handled below).
+  if (spec === true) {
+    return reqOrigin === 'null'
+      ? { value: null, reflected: true }
+      : { value: reqOrigin, reflected: true }
+  }
 
   if (typeof spec === 'string') {
     return spec === reqOrigin
@@ -107,11 +119,54 @@ export function corsMiddleware(opts: CorsOptions = {}): IngeniumMiddleware {
   // Construction-time validation: `credentials: true` + wildcard origin is
   // forbidden by the CORS spec — browsers reject the response.
   if (credentials && origin === '*') {
-    throw new Error(
+    throw new IngeniumError(
+      500,
+      'CORS_CREDENTIALS_WILDCARD',
       "ingenium.cors: `credentials: true` is incompatible with `origin: '*'`. " +
         'Specify an explicit origin (string, array, regex, or function) instead.',
     )
   }
+
+  // `credentials: true` + `origin: true` reflects *any* request Origin while
+  // setting `Access-Control-Allow-Credentials: true`. That is the classic
+  // credentialed-reflection vulnerability: any website can read authenticated
+  // responses. Unlike `origin: '*'` the browser does NOT reject this, so we must
+  // reject it ourselves at construction rather than silently shipping it.
+  if (credentials && origin === true) {
+    throw new IngeniumError(
+      500,
+      'CORS_CREDENTIALS_WILDCARD',
+      'ingenium.cors: `credentials: true` is incompatible with `origin: true` ' +
+        '(reflecting any Origin with credentials lets any site read authenticated ' +
+        'responses). Specify an explicit allowlist (string, array, regex, or function).',
+    )
+  }
+
+  // A function or RegExp origin combined with credentials can still reflect an
+  // untrusted Origin if the predicate is too permissive. We can't statically
+  // prove the predicate is safe, so warn (dev only) instead of throwing.
+  if (
+    IS_DEV &&
+    credentials &&
+    (typeof origin === 'function' || origin instanceof RegExp)
+  ) {
+    try {
+      process.emitWarning(
+        'ingenium.cors: `credentials: true` with a function/RegExp origin reflects ' +
+          'the request Origin when the predicate matches. Ensure it never matches ' +
+          'untrusted origins, or you expose authenticated responses to them.',
+        { code: 'INGENIUM_CORS_CREDENTIALS_REFLECT' },
+      )
+    } catch {
+      // Worker runtimes can throw on emitWarning; diagnostics are best-effort.
+    }
+  }
+
+  // A function origin can return '*' for some requests and a specific origin
+  // for others. Without `Vary: Origin` a shared cache could serve one caller's
+  // allowed-origin response to a different origin (cache poisoning), so we force
+  // the header on every response when the origin is computed per-request.
+  const originIsFunction = typeof origin === 'function'
 
   const methodsHeader = methods.join(',')
   const exposedHeader = exposedHeaders && exposedHeaders.length > 0
@@ -132,7 +187,7 @@ export function corsMiddleware(opts: CorsOptions = {}): IngeniumMiddleware {
       ctx,
     )
 
-    if (reflected) appendVary(ctx, 'Origin')
+    if (reflected || originIsFunction) appendVary(ctx, 'Origin')
 
     if (allowOrigin !== null) {
       ctx.set('access-control-allow-origin', allowOrigin)

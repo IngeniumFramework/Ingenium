@@ -1,6 +1,6 @@
 {
   "name": "ingenium-cli",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Project scaffolder CLI for Ingenium.",
   "type": "module",
   "bin": {
@@ -13,7 +13,10 @@
       "import": "./src/cli.ts"
     }
   },
-  "files": ["src", "bin"],
+  "files": [
+    "src",
+    "bin"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
@@ -21,7 +24,12 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "keywords": ["ingenium", "cli", "scaffold", "generator"],
+  "keywords": [
+    "ingenium",
+    "cli",
+    "scaffold",
+    "generator"
+  ],
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.5.0",

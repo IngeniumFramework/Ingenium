@@ -1,11 +1,10 @@
 {
   "name": "ingenium-learn",
-  "version": "0.0.0",
+  "version": "0.0.2",
   "private": true,
   "type": "module",
   "description": "Progressive tutorial: learn Ingenium one concept at a time.",
   "scripts": {
-    "step": "tsx",
     "1": "tsx steps/01-hello.ts",
     "2": "tsx steps/02-params.ts",
     "3": "tsx steps/03-middleware.ts",
@@ -13,7 +12,8 @@
     "5": "tsx steps/05-errors.ts",
     "6": "tsx steps/06-router.ts",
     "7": "tsx steps/07-plugin.ts",
-    "8": "tsx steps/08-sessions.ts"
+    "8": "tsx steps/08-sessions.ts",
+    "step": "tsx"
   },
   "engines": {
     "node": ">=20.0.0"

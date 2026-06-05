@@ -5,23 +5,40 @@ on:
   schedule:
     # Nightly at 06:00 UTC
     - cron: "0 6 * * *"
+  pull_request:
+    # Per-PR regression detector. Path-filtered so it only runs when the
+    # benchmark harness or the framework source it exercises changes — this
+    # keeps CI cost sane on docs-only / unrelated PRs.
+    paths:
+      - "benchmarks/**"
+      - "packages/ingenium/**"
+      - ".github/workflows/bench.yml"
 
 # TODO: add a Bun bench job once a Bun-native v2 harness exists.
-# The current v2 harness in benchmarks/scenarios/v2 spawns Node child processes,
-# so running it under Bun would not exercise the Bun runtime end-to-end.
+# The current v2 harness in benchmarks/scenarios/v2 spawns Node child processes
+# (`node --experimental-strip-types <server>.ts`), so running the harness under
+# Bun would still exercise the Node runtime end-to-end, not Bun. The Node
+# version matrix below varies the Node that runs BOTH harness and servers; it
+# does not — and cannot, with this harness — cover Bun. Honest scope.
 
 jobs:
   bench:
-    name: Run v2 benchmarks (Node 22)
+    name: Run v2 benchmarks (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      # Don't cancel Node 22's leg if Node 20's leg fails — we want both data
+      # points for regression triage.
+      fail-fast: false
+      matrix:
+        node: [20, 22]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node.js 22
+      - name: Setup Node.js ${{ matrix.node }}
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "${{ matrix.node }}"
           cache: npm
 
       - name: Install root dependencies
@@ -41,11 +58,15 @@ jobs:
             npx tsx scenarios/v2/body.ts
             echo "=== middleware ==="
             npx tsx scenarios/v2/middleware.ts
-          } | tee bench-output.txt
+            echo "=== payload-1kb ==="
+            npx tsx scenarios/v2/payload-1kb.ts
+            echo "=== payload-100kb ==="
+            npx tsx scenarios/v2/payload-100kb.ts
+          } | tee "bench-output-node${{ matrix.node }}.txt"
 
       - name: Upload bench output
         uses: actions/upload-artifact@v4
         with:
-          name: bench-output
-          path: benchmarks/bench-output.txt
+          name: bench-output-node${{ matrix.node }}
+          path: benchmarks/bench-output-node${{ matrix.node }}.txt
           if-no-files-found: error

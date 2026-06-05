@@ -280,7 +280,7 @@ describe('app.scope() — plugin registration inside a scope', () => {
     const counters = { global: 0, scoped: 0 }
 
     const auth: IngeniumPlugin<{ key: 'global' | 'scoped' }> = (target, opts) => {
-      target.use(async (ctx, next) => {
+      target.use(async (_ctx, next) => {
         counters[opts.key]++
         await next()
       })

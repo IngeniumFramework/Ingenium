@@ -9,6 +9,12 @@ import type {
   ResolvedIdempotencyOptions,
 } from './types.ts'
 
+/**
+ * Module-scope so V8 dead-code-eliminates the `if (IS_DEV)` diagnostic
+ * bodies in production builds. Read once at load — never per request.
+ */
+const IS_DEV = process.env.NODE_ENV !== 'production'
+
 const DEFAULT_METHODS: readonly HttpMethod[] = ['POST', 'PATCH', 'DELETE']
 
 /**
@@ -17,13 +23,45 @@ const DEFAULT_METHODS: readonly HttpMethod[] = ['POST', 'PATCH', 'DELETE']
  */
 const DEFAULT_CACHEABLE = (status: number): boolean => status >= 200 && status < 500
 
-/** Authorization-header-derived scope; falls back to `'anon'`. */
-function defaultScope(ctx: IngeniumContext): string {
+/**
+ * Sentinel returned by `defaultScope` for an unauthenticated request. A
+ * unique symbol (not the string `'anon'`) so the middleware can reliably
+ * distinguish "the framework couldn't isolate this client" from any string
+ * a user-supplied scope function might legitimately return. We must NOT
+ * cache across anonymous clients: the cache key is
+ * `<scope>:<method>:<path>:<key>`, so collapsing every anonymous caller to
+ * one constant lets client B reuse client A's idempotency key on the same
+ * route and be served A's full cached response — body AND Set-Cookie. IP
+ * is not a safe discriminator (shared NAT / spoofable), so we bypass.
+ */
+const ANON_SCOPE = Symbol('ingenium.idempotency.anon')
+
+/**
+ * Authorization-header-derived scope. Returns the `ANON_SCOPE` sentinel
+ * (not a string) when there is no Authorization header so the caller can
+ * detect the un-isolatable case and skip caching entirely.
+ */
+function defaultScope(ctx: IngeniumContext): string | typeof ANON_SCOPE {
   const auth = ctx.headers['authorization']
   if (typeof auth === 'string' && auth.length > 0) return auth
   if (Array.isArray(auth) && auth.length > 0 && typeof auth[0] === 'string') return auth[0]
-  return 'anon'
+  return ANON_SCOPE
 }
+
+/**
+ * Response headers that carry per-client secrets/session state and must
+ * NEVER be replayed from a cached entry onto a different request. Even with
+ * correct scoping these are dangerous to copy verbatim; stripping them is
+ * defense-in-depth so a misconfigured scope can't leak another client's
+ * session cookie or bearer credential.
+ */
+const SENSITIVE_REPLAY_HEADERS: readonly string[] = [
+  'set-cookie',
+  'authorization',
+  'proxy-authorization',
+  'www-authenticate',
+  'proxy-authenticate',
+]
 
 /** Pull a header value as a single string (first element if it came as an array). */
 function readHeader(ctx: IngeniumContext, lowerName: string): string | undefined {
@@ -76,6 +114,9 @@ function replay(ctx: IngeniumContext, cached: CachedResponse): void {
   for (const k of Object.keys(cached.headers)) {
     const v = cached.headers[k]
     if (v === undefined) continue
+    // Never replay per-client secrets onto a different request — a cached
+    // Set-Cookie / Authorization would hand one client another's session.
+    if (SENSITIVE_REPLAY_HEADERS.includes(k.toLowerCase())) continue
     ctx._headers[k] = Array.isArray(v) ? [...v] : v
   }
   ctx._headers['idempotent-replayed'] = 'true'
@@ -118,11 +159,17 @@ function replay(ctx: IngeniumContext, cached: CachedResponse): void {
  *   }))
  */
 export function idempotencyMiddleware(opts: IdempotencyOptions = {}): IngeniumMiddleware {
+  // When the user supplies their own scope function we trust it to isolate
+  // clients and never bypass. Only the built-in `defaultScope` can yield the
+  // un-isolatable anonymous sentinel, so we capture whether it's in play.
+  const usingDefaultScope = opts.scope === undefined
+  const scopeFn: (ctx: IngeniumContext) => string | typeof ANON_SCOPE = opts.scope ?? defaultScope
+
   const resolved: ResolvedIdempotencyOptions = {
     header: (opts.header ?? 'Idempotency-Key').toLowerCase(),
     store: opts.store ?? new IdempotencyMemoryStore(),
     ttlMs: (opts.ttlSeconds ?? 86_400) * 1000,
-    scope: opts.scope ?? defaultScope,
+    scope: scopeFn as (ctx: IngeniumContext) => string,
     methodSet: new Set(opts.methods ?? DEFAULT_METHODS),
     cacheable: opts.cacheable ?? DEFAULT_CACHEABLE,
   }
@@ -130,6 +177,10 @@ export function idempotencyMiddleware(opts: IdempotencyOptions = {}): IngeniumMi
   if (resolved.ttlMs <= 0) {
     throw new Error('idempotency: ttlSeconds must be > 0')
   }
+
+  // Warn at most once per process — the bypass is correct but the developer
+  // almost certainly wants an explicit `scope` for unauthenticated routes.
+  let anonBypassWarned = false
 
   // Per-key in-flight map. The promise resolves once the first handler
   // finishes and its response has been snapshotted (or with `null` if the
@@ -146,7 +197,29 @@ export function idempotencyMiddleware(opts: IdempotencyOptions = {}): IngeniumMi
       return next()
     }
 
-    const scope = resolved.scope(ctx)
+    const scope = scopeFn(ctx)
+
+    // Anonymous + default scope: there is no per-client discriminator, so
+    // caching here would serve one client's response (body + Set-Cookie) to
+    // another that happens to reuse the same Idempotency-Key on this route.
+    // Bypass entirely — run the handler without replay/store. (Only the
+    // built-in defaultScope can produce ANON_SCOPE; an explicit user scope
+    // never reaches this branch and keeps its prior behavior.)
+    if (scope === ANON_SCOPE) {
+      if (IS_DEV && usingDefaultScope && !anonBypassWarned) {
+        anonBypassWarned = true
+        try {
+          process.emitWarning(
+            'idempotency: request to a cacheable route has no Authorization header, so the default scope cannot isolate clients. Idempotency caching was bypassed for this request to avoid serving one client the cached response of another. Supply an explicit `scope` function for unauthenticated endpoints.',
+            { type: 'IngeniumIdempotencyWarning' },
+          )
+        } catch {
+          // process.emitWarning can throw in unusual runtimes (workers); swallow.
+        }
+      }
+      return next()
+    }
+
     const cacheKey = `${scope}:${ctx.method}:${ctx.path}:${headerValue}`
 
     // 1. Persisted cache hit?

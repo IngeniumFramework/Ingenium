@@ -14,9 +14,16 @@ import type { HttpMethod } from '../router/types.ts'
 import type {
   WebSocketHandler,
   WebSocketHandlerOptions,
+  WebSocketOriginOption,
   WsRegistrar,
   WsRoute,
 } from './types.ts'
+
+/**
+ * Read once at module load so V8 dead-code-eliminates the dev warning in
+ * production builds (`if (false) { ... }`). See CLAUDE.md.
+ */
+const IS_DEV = process.env.NODE_ENV !== 'production'
 
 /**
  * Attempt to detect whether `ws` is installed. Used by the test suite to
@@ -53,6 +60,21 @@ export function createWebSocketRegistrar(): WsRegistrar {
     if (routes.has(path)) {
       throw new Error(`ingenium.ws: path "${path}" already has a WebSocket handler`)
     }
+    // WS handlers run OUTSIDE the middleware pipeline, so a route with no
+    // `origin` policy is open to Cross-Site WebSocket Hijacking — a browser
+    // attaches the victim's cookies to a cross-origin upgrade. Nudge the
+    // developer to opt into an Origin check (or authenticate explicitly).
+    if (IS_DEV && options.origin === undefined) {
+      try {
+        process.emitWarning(
+          `ingenium.ws: WebSocket route "${path}" registered without an \`origin\` option. ` +
+            'WS handlers run outside the middleware pipeline and the browser sends the ' +
+            "user's cookies on cross-origin upgrades — restrict the Origin (e.g. " +
+            '`{ origin: true }` for same-origin) or authenticate inside the handler to ' +
+            'prevent Cross-Site WebSocket Hijacking (CSWSH).',
+        )
+      } catch { /* worker runtimes can throw on emitWarning */ }
+    }
     routes.set(path, { path, handler, options })
   }
 
@@ -77,6 +99,19 @@ export function createWebSocketRegistrar(): WsRegistrar {
         // 404-equivalent for WebSockets is just refusing the upgrade.
         socket.destroy()
         return
+      }
+
+      // CSWSH defense: enforce the Origin policy BEFORE `handleUpgrade`, so a
+      // rejected cross-origin request never completes the handshake. We reply
+      // with a real `403` handshake response (not a bare destroy) so the
+      // browser surfaces the rejection rather than a generic socket error.
+      if (route.options.origin !== undefined) {
+        const origin = req.headers.origin
+        if (!isOriginAllowed(route.options.origin, origin, req)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n')
+          socket.destroy()
+          return
+        }
       }
 
       // Lazy-load `ws`. On the first upgrade, dynamically import. If `ws`
@@ -158,6 +193,41 @@ export function createWebSocketRegistrar(): WsRegistrar {
   }
 
   return { add, attach, close }
+}
+
+/**
+ * Decide whether an upgrade Origin passes the configured policy. Centralized
+ * so the listener stays readable and the boolean/string/array/function arms
+ * are tested in one place.
+ *
+ * `true` means same-origin: the `Origin` URL's host (incl. port) must match
+ * the request `Host` header. A missing `Origin` (non-browser clients never
+ * send one) is rejected under `true` because we cannot prove same-origin —
+ * browser-facing sockets are the threat model here; trusted backend clients
+ * should use an explicit allowlist or a custom verifier instead.
+ */
+function isOriginAllowed(
+  policy: WebSocketOriginOption,
+  origin: string | undefined,
+  req: IncomingMessage,
+): boolean {
+  if (typeof policy === 'function') return policy(origin, req)
+
+  if (policy === false) return true // explicitly disabled — allow all
+  if (policy === true) {
+    if (origin === undefined) return false
+    let originHost: string
+    try {
+      originHost = new URL(origin).host
+    } catch {
+      return false // malformed Origin header
+    }
+    return originHost === req.headers.host
+  }
+
+  // string | string[] — exact allowlist match against the raw Origin header.
+  if (origin === undefined) return false
+  return Array.isArray(policy) ? policy.includes(origin) : policy === origin
 }
 
 /**
