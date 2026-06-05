@@ -1,3 +1,4 @@
+import { Buffer } from 'node:buffer'
 import { createPublicKey, type KeyObject } from 'node:crypto'
 import { lookup } from 'node:dns/promises'
 
@@ -28,6 +29,61 @@ const cache = new Map<string, CacheEntry>()
  * 50 is far above any legitimate fan-out of IdPs a single process talks to.
  */
 const MAX_JWKS_CACHE_ENTRIES = 50
+
+/**
+ * Hard cap on the JWKS response body we will buffer (1 MiB).
+ *
+ * WHY: the 5s fetch timeout bounds wall-clock but NOT bytes — a malicious or
+ * compromised IdP (or a MITM on the `jwksUrl`) can stream a multi-GB body
+ * within the timeout and OOM the process. We bound the read explicitly and
+ * abort once the cap is crossed. A real JWKS is a few KB.
+ */
+const MAX_JWKS_BODY_BYTES = 1024 * 1024
+
+/**
+ * Hard cap on the number of JWKs we parse from one response.
+ *
+ * WHY: even under the byte cap, an attacker-controlled `keys` array forces a
+ * `createPublicKey` per entry and bloats the cached Map — CPU/memory
+ * amplification. No legitimate IdP publishes anywhere near 100 active keys.
+ */
+const MAX_JWKS_KEYS = 100
+
+/**
+ * Read a `fetch` Response body as text, aborting once `maxBytes` is exceeded.
+ *
+ * `res.text()`/`res.json()` buffer the WHOLE body with no size bound, so a
+ * chunked response with no (or a lying) `Content-Length` defeats a header
+ * check. We stream-read and stop early. The cheap `Content-Length` check still
+ * runs first to reject honest-but-oversized bodies without reading a byte.
+ */
+async function readBoundedText(res: Response, maxBytes: number): Promise<string> {
+  const declared = res.headers.get('content-length')
+  if (declared !== null) {
+    const n = Number(declared)
+    if (Number.isFinite(n) && n > maxBytes) throw new Error('jwks_fetch_failed')
+  }
+  const stream = res.body
+  if (!stream) {
+    const text = await res.text()
+    if (Buffer.byteLength(text) > maxBytes) throw new Error('jwks_fetch_failed')
+    return text
+  }
+  const reader = stream.getReader()
+  const chunks: Buffer[] = []
+  let total = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maxBytes) {
+      try { await reader.cancel() } catch { /* already closing */ }
+      throw new Error('jwks_fetch_failed')
+    }
+    chunks.push(Buffer.from(value))
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
 
 /**
  * Insert a fresh cache entry, evicting the oldest if we're at capacity.
@@ -271,7 +327,7 @@ async function doFetch(url: string): Promise<Map<string, KeyObject>> {
 
   let body: unknown
   try {
-    body = await res.json()
+    body = JSON.parse(await readBoundedText(res, MAX_JWKS_BODY_BYTES))
   } catch {
     throw new Error('jwks_fetch_failed')
   }
@@ -279,6 +335,11 @@ async function doFetch(url: string): Promise<Map<string, KeyObject>> {
   if (!body || typeof body !== 'object') throw new Error('jwks_fetch_failed')
   const jwks = body as JwksResponse
   if (!Array.isArray(jwks.keys) || jwks.keys.length === 0) {
+    throw new Error('jwks_fetch_failed')
+  }
+  // Reject pathological keysets outright rather than parsing the first N — a
+  // huge `keys` array is itself the attack (CPU + cache bloat).
+  if (jwks.keys.length > MAX_JWKS_KEYS) {
     throw new Error('jwks_fetch_failed')
   }
 

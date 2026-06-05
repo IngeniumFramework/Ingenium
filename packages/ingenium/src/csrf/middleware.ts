@@ -229,7 +229,10 @@ function appendSetCookie(ctx: IngeniumContext, value: string): void {
 }
 
 function parseCookies(header: string | string[] | undefined): Record<string, string> {
-  const out: Record<string, string> = {}
+  // Null-prototype: a cookie named `constructor`/`toString`/`__proto__` must be
+  // stored as plain own-data, not collide with inherited members (which would
+  // make the `k in out` first-wins guard mis-fire). Mirrors the session parser.
+  const out: Record<string, string> = Object.create(null)
   if (!header) return out
   const flat = Array.isArray(header) ? header.join('; ') : header
   for (const piece of flat.split(';')) {

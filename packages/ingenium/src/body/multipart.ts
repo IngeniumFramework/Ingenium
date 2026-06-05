@@ -4,6 +4,8 @@ import type { MultipartFile, MultipartOptions, MultipartResult } from './multipa
 
 /** Default per-file cap: 10 MiB. */
 const DEFAULT_MAX_FILE_SIZE = 10 * 1024 * 1024
+/** Default per-field (non-file) cap: 1 MiB. */
+const DEFAULT_MAX_FIELD_SIZE = 1 * 1024 * 1024
 /** Default file-count cap. */
 const DEFAULT_MAX_FILES = 20
 /** Default field-count cap. */
@@ -160,6 +162,7 @@ export function parseMultipart(
   opts: MultipartOptions = {},
 ): MultipartResult {
   const maxFileSize = opts.maxFileSize ?? DEFAULT_MAX_FILE_SIZE
+  const maxFieldSize = opts.maxFieldSize ?? DEFAULT_MAX_FIELD_SIZE
   const maxFiles = opts.maxFiles ?? DEFAULT_MAX_FILES
   const maxFields = opts.maxFields ?? DEFAULT_MAX_FIELDS
   const allowed = opts.allowedMimePrefixes
@@ -248,6 +251,14 @@ export function parseMultipart(
         throw new IngeniumBadRequestError('Too many files')
       }
     } else {
+      // Plain field — cap its size independently of the file/body limits so a
+      // raised `maxBytes` doesn't turn a single text field into an unbounded
+      // memory sink (the value is materialized as a UTF-8 string).
+      if (partBody.length > maxFieldSize) {
+        throw new IngeniumPayloadTooLargeError(
+          `Field "${headers.name}" exceeded ${maxFieldSize} bytes`,
+        )
+      }
       fieldCount++
       if (fieldCount > maxFields) {
         throw new IngeniumBadRequestError('Too many fields')

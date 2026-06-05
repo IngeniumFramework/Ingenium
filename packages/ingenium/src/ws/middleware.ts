@@ -11,6 +11,7 @@ import type { Server as HttpServer, IncomingMessage } from 'node:http'
 import type { Socket } from 'node:net'
 import { IngeniumContext } from '../context/context.ts'
 import type { HttpMethod } from '../router/types.ts'
+import type { TrustProxy } from '../proxy/trust.ts'
 import type {
   WebSocketHandler,
   WebSocketHandlerOptions,
@@ -24,6 +25,22 @@ import type {
  * production builds (`if (false) { ... }`). See CLAUDE.md.
  */
 const IS_DEV = process.env.NODE_ENV !== 'production'
+
+/**
+ * Default upgrade-handshake deadline. A client that opens the socket and stalls
+ * (never finishing the handshake, or never sending a frame) would otherwise pin
+ * the file descriptor forever — a slowloris-style DoS. We arm `socket.setTimeout`
+ * before `handleUpgrade` and clear it the moment the handshake completes.
+ */
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000
+
+/** Construction-time options for the registrar. */
+export interface WsRegistrarOptions {
+  /** Carried in from the app so `ctx.ip` inside a WS handler honors trust-proxy. */
+  trustProxy?: TrustProxy
+  /** Upgrade-handshake deadline in ms. Default 10_000. `0` disables. */
+  handshakeTimeoutMs?: number
+}
 
 /**
  * Attempt to detect whether `ws` is installed. Used by the test suite to
@@ -44,7 +61,9 @@ export async function peerHasWs(): Promise<boolean> {
  * `enableWebSockets()` (or the app's `listen()` integration) calls `attach()`
  * once the underlying `http.Server` is created.
  */
-export function createWebSocketRegistrar(): WsRegistrar {
+export function createWebSocketRegistrar(options: WsRegistrarOptions = {}): WsRegistrar {
+  const trustProxy = options.trustProxy ?? false
+  const handshakeTimeoutMs = options.handshakeTimeoutMs ?? DEFAULT_HANDSHAKE_TIMEOUT_MS
   const routes: Map<string, WsRoute> = new Map()
   let attachedServer: HttpServer | null = null
   // The `ws` `WebSocketServer` instance, lazy-initialized on first upgrade.
@@ -86,6 +105,29 @@ export function createWebSocketRegistrar(): WsRegistrar {
     attachedServer = httpServer
 
     upgradeListener = (req, socket, head) => {
+      // Slowloris defense: a client can open the TCP socket and stall the
+      // handshake (including across the lazy `import('ws')` below), pinning the
+      // FD indefinitely. We use an ABSOLUTE deadline, not `socket.setTimeout`
+      // (an idle timer an active trickle of bytes would keep resetting): the
+      // handshake must complete within `handshakeTimeoutMs` of the upgrade
+      // arriving, full stop. Cleared the instant the handshake completes, and
+      // on socket teardown so the timer can't outlive the socket.
+      let handshakeTimer: ReturnType<typeof setTimeout> | null = null
+      if (handshakeTimeoutMs > 0) {
+        handshakeTimer = setTimeout(() => socket.destroy(), handshakeTimeoutMs)
+        // Don't keep the event loop alive solely for this guard.
+        if (typeof handshakeTimer.unref === 'function') handshakeTimer.unref()
+        socket.once('close', () => {
+          if (handshakeTimer) clearTimeout(handshakeTimer)
+        })
+      }
+      const clearHandshakeTimer = (): void => {
+        if (handshakeTimer) {
+          clearTimeout(handshakeTimer)
+          handshakeTimer = null
+        }
+      }
+
       // Parse the path from the upgrade request URL. We only look at the
       // pathname — query strings are exposed via `ctx.rawQuery` for handlers
       // that care.
@@ -146,7 +188,10 @@ export function createWebSocketRegistrar(): WsRegistrar {
         }
 
         wss.handleUpgrade(req, socket, head, (ws) => {
-          const ctx = buildMinimalContext(req, path)
+          // Handshake is done — disarm the deadline so a long-lived connection
+          // isn't torn down mid-session. (The handler owns liveness from here.)
+          clearHandshakeTimer()
+          const ctx = buildMinimalContext(req, path, trustProxy)
           try {
             const ret = route.handler(ws, ctx)
             if (ret && typeof (ret as Promise<unknown>).then === 'function') {
@@ -238,7 +283,11 @@ function isOriginAllowed(
  * full request pipeline (no middleware, no decorators) because the upgrade
  * has already taken place — the handler owns the socket from here.
  */
-function buildMinimalContext(req: IncomingMessage, path: string): IngeniumContext {
+function buildMinimalContext(
+  req: IncomingMessage,
+  path: string,
+  trustProxy: TrustProxy,
+): IngeniumContext {
   const ctx = new IngeniumContext()
   ctx.method = (req.method ?? 'GET') as HttpMethod
   ctx.url = req.url ?? '/'
@@ -247,5 +296,10 @@ function buildMinimalContext(req: IncomingMessage, path: string): IngeniumContex
   const qIdx = url.indexOf('?')
   ctx.rawQuery = qIdx >= 0 ? url.slice(qIdx + 1) : ''
   ctx.headers = req.headers
+  // Surface the real peer address and the app's trust-proxy config so a handler
+  // that authorizes on `ctx.ip` resolves it the same way the HTTP path does.
+  // Without this, `ctx.ip` would return the pool default and ignore XFF policy.
+  ctx.remoteAddress = req.socket?.remoteAddress ?? '127.0.0.1'
+  ctx._trustProxy = trustProxy
   return ctx
 }

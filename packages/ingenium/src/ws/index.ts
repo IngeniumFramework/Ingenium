@@ -29,6 +29,7 @@
 
 import type { IngeniumApp } from '../app.ts'
 import type { ListeningServer, Transport } from '../transport/types.ts'
+import type { TrustProxy } from '../proxy/trust.ts'
 import { createWebSocketRegistrar, peerHasWs } from './middleware.ts'
 import { WsNodeAdapter } from './ws-node-adapter.ts'
 import type {
@@ -85,7 +86,11 @@ export interface EnableWebSocketsOptions {
 export function enableWebSockets(app: IngeniumApp, opts: EnableWebSocketsOptions = {}): void {
   if (APP_STATE.has(app)) return
 
-  const registrar = createWebSocketRegistrar()
+  // Thread the app's trust-proxy config into the registrar so `ctx.ip` inside a
+  // WS handler resolves XFF the same way the HTTP path does. `_trustProxy` is a
+  // TypeScript-private field (not hidden at runtime); bracket-access it.
+  const trustProxy = (app as unknown as { _trustProxy?: TrustProxy })._trustProxy ?? false
+  const registrar = createWebSocketRegistrar({ trustProxy })
   const state: WsAppState = { registrar, integrators: [], enabled: true }
   APP_STATE.set(app, state)
 

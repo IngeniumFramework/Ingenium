@@ -11,6 +11,15 @@ export interface MultipartOptions {
   maxBytes?: number
   /** Per-file size cap. Default 10 * 1024 * 1024 (10 MiB). */
   maxFileSize?: number
+  /**
+   * Per-field (non-file part) size cap. Default 1 * 1024 * 1024 (1 MiB).
+   *
+   * Without this, a plain field is bounded only by `maxBytes` — so raising
+   * `maxBytes` to permit large file uploads would silently let a single text
+   * field buffer that much memory as a UTF-8 string. This caps each field
+   * independently of the file/body limits.
+   */
+  maxFieldSize?: number
   /** Maximum number of file parts in one request. Default 20. */
   maxFiles?: number
   /** Maximum number of plain (non-file) field parts. Default 100. */

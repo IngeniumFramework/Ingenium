@@ -191,7 +191,11 @@ export function corsMiddleware(opts: CorsOptions = {}): IngeniumMiddleware {
 
     if (allowOrigin !== null) {
       ctx.set('access-control-allow-origin', allowOrigin)
-      if (credentials) {
+      // Never pair `ACAO: *` with `ACAC: true`. The construction guards block a
+      // literal `origin: '*'`/`origin: true`, but a function/RegExp origin can
+      // still RETURN '*' at runtime. Browsers reject the combination outright,
+      // so emitting it just yields a confusing failure — suppress credentials.
+      if (credentials && allowOrigin !== '*') {
         ctx.set('access-control-allow-credentials', 'true')
       }
     }

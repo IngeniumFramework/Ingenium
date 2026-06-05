@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { IngeniumContext } from '../src/context/context.ts'
-import { idempotencyMiddleware } from '../src/idempotency/middleware.ts'
+import { idempotencyMiddleware, buildIdempotencyCacheKey } from '../src/idempotency/middleware.ts'
 import { IdempotencyMemoryStore } from '../src/idempotency/store.ts'
 import type { HttpMethod } from '../src/router/types.ts'
 
@@ -66,7 +66,7 @@ describe('idempotency — caching + replay', () => {
     expect(ctx._statusCode).toBe(201)
     expect(readJson(ctx)).toEqual({ id: 'ch_1' })
 
-    const cached = await store.get('Bearer A:POST:/charges:k1')
+    const cached = await store.get(buildIdempotencyCacheKey('Bearer A', 'POST', '/charges', 'k1'))
     expect(cached).not.toBeNull()
     expect(cached?.statusCode).toBe(201)
     store.destroy()
@@ -121,7 +121,11 @@ describe('idempotency — caching + replay', () => {
     const ctx = makeCtx('POST', '/x', { 'idempotency-key': 'abc' })
     await mw(ctx, async () => { ctx.json({ ok: 1 }) })
 
-    expect(setSpy).toHaveBeenCalledWith('tenant-42:POST:/x:abc', expect.any(Object), expect.any(Number))
+    expect(setSpy).toHaveBeenCalledWith(
+      buildIdempotencyCacheKey('tenant-42', 'POST', '/x', 'abc'),
+      expect.any(Object),
+      expect.any(Number),
+    )
     store.destroy()
   })
 })
@@ -248,7 +252,7 @@ describe('idempotency — cacheable predicate (5xx skipped by default)', () => {
     expect(h1).toHaveBeenCalledTimes(1)
 
     // Cache should be empty for this key.
-    expect(await store.get('Bearer A:POST:/x:k500')).toBeNull()
+    expect(await store.get(buildIdempotencyCacheKey('Bearer A', 'POST', '/x', 'k500'))).toBeNull()
 
     const b = makeCtx('POST', '/x', headers)
     const h2 = vi.fn(async () => { b.json({ ok: true }, 200) })
@@ -290,7 +294,7 @@ describe('idempotency — cacheable predicate (5xx skipped by default)', () => {
     const h1 = vi.fn(async () => { a.json({ error: 'bad' }, 422) })
     await mw(a, h1)
     expect(h1).toHaveBeenCalledTimes(1)
-    expect(await store.get('Bearer A:POST:/x:k-strict')).toBeNull()
+    expect(await store.get(buildIdempotencyCacheKey('Bearer A', 'POST', '/x', 'k-strict'))).toBeNull()
 
     const b = makeCtx('POST', '/x', headers)
     const h2 = vi.fn(async () => { b.json({ run: 2 }, 200) })

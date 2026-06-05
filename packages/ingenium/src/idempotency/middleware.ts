@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import type { IngeniumContext, ResponseBody } from '../context/context.ts'
 import type { IngeniumMiddleware } from '../middleware/types.ts'
 import type { HttpMethod } from '../router/types.ts'
@@ -17,6 +18,38 @@ import type {
 const IS_DEV = process.env.NODE_ENV !== 'production'
 
 const DEFAULT_METHODS: readonly HttpMethod[] = ['POST', 'PATCH', 'DELETE']
+
+/**
+ * Length-prefixed encoding of the cache-key components. Prefixing each part
+ * with its byte length makes the boundaries unambiguous regardless of what
+ * characters (including `:`) appear inside any component, so no two distinct
+ * tuples can encode to the same string. Fed into a hash by the caller.
+ */
+function idempotencyKeyParts(...parts: string[]): string {
+  let out = ''
+  for (const p of parts) out += Buffer.byteLength(p) + ':' + p + '\n'
+  return out
+}
+
+/**
+ * Build the store key for a request. A naive `${scope}:${method}:${path}:${key}`
+ * join is ambiguous — `scope`/`path` can contain `:`, so distinct tuples could
+ * collide and let one client replay another's cached response. We hash a
+ * length-prefixed encoding so component boundaries are unambiguous and the
+ * stored key is a fixed-length digest rather than the raw (often secret-derived)
+ * scope.
+ *
+ * @internal Exposed for tests that assert the scope→key mapping; not a public
+ * API and may change without a SemVer bump.
+ */
+export function buildIdempotencyCacheKey(
+  scope: string,
+  method: string,
+  path: string,
+  key: string,
+): string {
+  return createHash('sha256').update(idempotencyKeyParts(scope, method, path, key)).digest('hex')
+}
 
 /**
  * Upper bound on the `Idempotency-Key` header length. The key is embedded
@@ -238,7 +271,8 @@ export function idempotencyMiddleware(opts: IdempotencyOptions = {}): IngeniumMi
       return next()
     }
 
-    const cacheKey = `${scope}:${ctx.method}:${ctx.path}:${headerValue}`
+    // Collision-safe composite key (see buildIdempotencyCacheKey).
+    const cacheKey = buildIdempotencyCacheKey(scope, ctx.method, ctx.path, headerValue)
 
     // 1. Persisted cache hit?
     const existing = await resolved.store.get(cacheKey)

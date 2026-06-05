@@ -112,7 +112,9 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
   const absRoot = path.resolve(root)
   const indexFile = opts.index === undefined ? DEFAULT_INDEX : opts.index
   const maxAgeMs = opts.maxAge ?? 0
-  const cacheControl = `public, max-age=${Math.floor(maxAgeMs / 1000)}`
+  // Clamp to 0: a negative `maxAge` would emit `max-age=-N`, which some
+  // intermediaries interpret as "cache indefinitely" on a public root.
+  const cacheControl = `public, max-age=${Math.max(0, Math.floor(maxAgeMs / 1000))}`
   const extensions = opts.extensions ?? []
   const dotfiles = opts.dotfiles ?? 'ignore'
   const followSymlinks = (opts.symlinks ?? 'deny') === 'allow'
@@ -264,8 +266,15 @@ export function staticMiddleware(root: string, opts: StaticOptions = {}): Ingeni
     // Static roots commonly serve user-controlled uploads. Without an explicit
     // nosniff, a browser may MIME-sniff e.g. a .txt/.jpg upload as HTML and
     // execute embedded markup → stored XSS. Pin the declared content-type.
-    // Only set if a handler/middleware upstream hasn't already chosen a value.
-    if (ctx._headers['x-content-type-options'] === undefined) {
+    // Force `nosniff` UNLESS the upstream value already carries a `nosniff`
+    // token: this preserves a deliberate `nosniff, custom` while still
+    // overriding a weaker/empty value (e.g. '' or a typo) that would silently
+    // disable sniffing protection on a static response.
+    const existingXcto = ctx._headers['x-content-type-options']
+    const hasNosniff =
+      typeof existingXcto === 'string' &&
+      existingXcto.split(',').some((t) => t.trim().toLowerCase() === 'nosniff')
+    if (!hasNosniff) {
       ctx.set('x-content-type-options', 'nosniff')
     }
     ctx.set('accept-ranges', 'bytes')

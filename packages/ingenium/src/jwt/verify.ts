@@ -359,6 +359,10 @@ export function verifyJwt<T = Record<string, unknown>>(
   }
   if (typeof opts.maxAgeSeconds === 'number') {
     if (!isFiniteNumber(claims.iat)) return { error: 'too_old' }
+    // A future-dated `iat` would otherwise sail past the freshness ceiling
+    // (`iat + maxAge` stays far above `now`), making the max-age window
+    // effectively unbounded. Reject `iat` beyond the clock-skew tolerance.
+    if (claims.iat > now + skew) return { error: 'too_old' }
     if (claims.iat + opts.maxAgeSeconds <= now - skew) return { error: 'too_old' }
   }
   if (opts.audience !== undefined) {
