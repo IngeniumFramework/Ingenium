@@ -16,7 +16,7 @@
   "dependencies": {
     "ingenium": "*",
     "better-sqlite3": "^11.5.0",
-    "zod": "^3.23.0",
+    "zod": "^4.4.3",
     "pino": "^9.5.0"
   },
   "devDependencies": {

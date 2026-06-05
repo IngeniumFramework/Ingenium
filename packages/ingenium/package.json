@@ -43,7 +43,7 @@
   "homepage": "https://github.com/IngeniumFramework/Ingenium#readme",
   "bugs": "https://github.com/IngeniumFramework/Ingenium/issues",
   "peerDependencies": {
-    "zod": "^3.23.0",
+    "zod": "^4.4.3",
     "ws": "^8.18.0"
   },
   "peerDependenciesMeta": {
@@ -55,7 +55,7 @@
     }
   },
   "devDependencies": {
-    "zod": "^3.23.0",
+    "zod": "^4.4.3",
     "ws": "^8.18.0",
     "@types/ws": "^8.5.0"
   }
