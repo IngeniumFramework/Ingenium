@@ -1,4 +1,4 @@
-import type { IngeniumContext } from '../context/context.ts'
+import type { IngeniumContext } from 'ingenium'
 
 /** Result of a custom API-key validator. */
 export type ApiKeyValidator = (

@@ -7,8 +7,7 @@ import {
   type KeyObject,
 } from 'node:crypto'
 import { Buffer } from 'node:buffer'
-import { IngeniumContext } from '../src/context/context.ts'
-import { IngeniumUnauthorizedError } from '../src/errors.ts'
+import { IngeniumContext, IngeniumUnauthorizedError } from 'ingenium'
 import { jwtMiddleware } from '../src/jwt/middleware.ts'
 import { verifyJwt } from '../src/jwt/verify.ts'
 import { clearJwksCache } from '../src/jwt/jwks.ts'

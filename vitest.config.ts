@@ -11,6 +11,7 @@ export default defineConfig({
       'ingenium-bun': here('./packages/ingenium-bun/src/index.ts'),
       'ingenium-cli': here('./packages/ingenium-cli/src/cli.ts'),
       'ingenium-redis': here('./packages/ingenium-redis/src/index.ts'),
+      'ingenium-auth': here('./packages/ingenium-auth/src/index.ts'),
       ingenium: here('./packages/ingenium/src/index.ts'),
     },
   },

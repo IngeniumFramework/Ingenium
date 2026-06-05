@@ -38,7 +38,8 @@
 - HTTP/2 (h2) + HTTP/2 cleartext (h2c) transports.
 - WebSocket support via the opt-in `ws` peer dep; SSE helper sharing the same dispatch entry.
 - Plugin system — `app.register(plugin, opts?)` with lifecycle hooks (`onRoute`, `onCompose`, `onRequest`, `onResponse`, `onError`) and per-request decorators (`app.decorate` lazy, `app.decorateRequest` eager). Hot path short-circuits when nothing is registered.
-- Production primitives — `ingenium.static`, `ingenium.cors`, `ingenium.csrf`, `ingenium.rateLimit`, `sessionMiddleware`, `ingenium.idempotency`, `ingenium.jwt`, `ingenium.apiKey`, `ingenium.problemDetails`, content negotiation, trust-proxy, graceful shutdown.
+- Production primitives — `ingenium.static`, `ingenium.cors`, `ingenium.csrf`, `ingenium.rateLimit`, `sessionMiddleware`, `ingenium.idempotency`, `ingenium.problemDetails`, content negotiation, trust-proxy, graceful shutdown.
+- Authentication (`ingenium-auth`) — `jwtMiddleware` (HMAC / asymmetric / JWKS, with SSRF + algorithm-confusion hardening) and `apiKeyMiddleware` (constant-time allow-list or custom validator). Extracted from core so non-authenticating apps don't carry the JWT/JWKS stack.
 - Hardening — header injection guard, `ctx.json()` safety on circular/BigInt, `IngeniumTimeoutError` (503) with late-write protection via the `_epoch` counter, hard transport-layer body cap (`maxRequestBytes`).
 - Dev-mode footgun warnings (NODE_ENV-gated, zero prod cost) — `IngeniumDoubleWriteWarning`, `IngeniumTrustProxyWarning`, `IngeniumResponseObjectWarning`, plus a hard `TypeError` on `app.listen()` called twice.
 - CLI scaffolder — `ingenium new <name> [--bun|--minimal]` (`ingenium-cli`) for bootstrapping new apps.

@@ -1,8 +1,7 @@
 import { timingSafeEqual } from 'node:crypto'
 import { Buffer } from 'node:buffer'
-import { IngeniumUnauthorizedError } from '../errors.ts'
-import type { IngeniumMiddleware } from '../middleware/types.ts'
-import type { IngeniumContext } from '../context/context.ts'
+import { IngeniumUnauthorizedError } from 'ingenium'
+import type { IngeniumMiddleware, IngeniumContext } from 'ingenium'
 import type { ApiKeyLogger, ApiKeyOptions, ApiKeyValidator } from './types.ts'
 
 /**

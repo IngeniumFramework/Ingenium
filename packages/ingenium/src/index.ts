@@ -13,8 +13,6 @@ import { rateLimit } from './rate-limit/middleware.ts'
 import { csrfMiddleware } from './csrf/middleware.ts'
 import { problemDetailsMiddleware } from './problem/middleware.ts'
 import { idempotencyMiddleware } from './idempotency/middleware.ts'
-import { jwtMiddleware } from './jwt/middleware.ts'
-import { apiKeyMiddleware } from './api-key/middleware.ts'
 import { openapiHandler } from './openapi/handler.ts'
 
 // ───── App + Router ────────────────────────────────────────────────────────
@@ -154,25 +152,10 @@ export type {
   IdempotencyStore,
 } from './idempotency/types.ts'
 
-// ───── JWT middleware ──────────────────────────────────────────────────────
-export { jwtMiddleware, IngeniumJwtKeyAlgMismatchError } from './jwt/middleware.ts'
-export { verifyJwt } from './jwt/verify.ts'
-export { fetchJwks, clearJwksCache } from './jwt/jwks.ts'
-export type {
-  JwtAlgorithm,
-  JwtHeader,
-  JwtKey,
-  JwtOptions,
-  JwtSecret,
-  JwtSecretResolver,
-  JwtTokenReader,
-  JwtVerified,
-  JwtLogger,
-} from './jwt/types.ts'
-
-// ───── API-key middleware ──────────────────────────────────────────────────
-export { apiKeyMiddleware } from './api-key/middleware.ts'
-export type { ApiKeyOptions, ApiKeyValidator, ApiKeyLogger } from './api-key/types.ts'
+// ───── JWT + API-key middleware ────────────────────────────────────────────
+// Moved to the `ingenium-auth` package (v0.0.5) so apps that don't
+// authenticate don't carry the JWT/JWKS stack. Import from there:
+//   import { jwtMiddleware, apiKeyMiddleware } from 'ingenium-auth'
 
 // ───── OpenAPI 3.1 spec generation ─────────────────────────────────────────
 export { generateOpenApi } from './openapi/generate.ts'
@@ -320,8 +303,6 @@ export const ingenium = Object.assign(ingeniumCore, {
   rateLimit,
   problemDetails: problemDetailsMiddleware,
   idempotency: idempotencyMiddleware,
-  jwt: jwtMiddleware,
-  apiKey: apiKeyMiddleware,
   openapiHandler,
 })
 

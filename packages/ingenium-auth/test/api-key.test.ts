@@ -1,6 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { IngeniumContext } from '../src/context/context.ts'
-import { IngeniumUnauthorizedError } from '../src/errors.ts'
+import { IngeniumContext, IngeniumUnauthorizedError } from 'ingenium'
 import { apiKeyMiddleware } from '../src/api-key/middleware.ts'
 
 function ctxWith(headers: Record<string, string | string[]> = {}, query = ''): IngeniumContext {

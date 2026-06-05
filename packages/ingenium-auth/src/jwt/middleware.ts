@@ -1,8 +1,7 @@
 import { Buffer } from 'node:buffer'
 import type { KeyObject } from 'node:crypto'
-import { IngeniumError, IngeniumUnauthorizedError } from '../errors.ts'
-import type { IngeniumMiddleware } from '../middleware/types.ts'
-import type { IngeniumContext } from '../context/context.ts'
+import { IngeniumError, IngeniumUnauthorizedError } from 'ingenium'
+import type { IngeniumMiddleware, IngeniumContext } from 'ingenium'
 import type {
   JwtAlgorithm,
   JwtHeader,

@@ -115,7 +115,7 @@ Native primitives an API team actually needs in prod, all opt-in:
 | `ctx.json()` safety on circular refs / BigInt | Throws `IngeniumUnserializableError` (500) with the structural reason | No more useless `TypeError: Converting circular...` bubbling up as a generic 500. `safeJsonStringify(value)` exported for lenient mode. |
 | Idempotency-Key — skip caching 5xx | `ingenium.idempotency({ cacheable: (s) => s < 500 })` (default) | A transient 500 no longer gets replayed for the entire TTL. |
 | Compat shim — real-stream Express drop-in | `expressCompat(mw)` runs `(req, res, next)` middleware on real Node streams (`req` is a `Readable`, `res` a `Writable`) | `body-parser`, `multer`, `compression`, `express-session`, `morgan` all work end-to-end; cost is opt-in per wrapped middleware. |
-| Asymmetric JWT (RS/PS/ES + JWKS) | `ingenium.jwt({ algorithms: ['RS256'], jwksUrl: '...' })` | Required for any IdP with a JWKS endpoint (Auth0, Okta, Cognito, Clerk, Supabase). Algorithm-confusion attacks blocked at the allowlist. `'none'` rejected unconditionally. |
+| Asymmetric JWT (RS/PS/ES + JWKS) | `jwtMiddleware({ algorithms: ['RS256'], jwksUrl: '...' })` from [`ingenium-auth`](packages/ingenium-auth) | Required for any IdP with a JWKS endpoint (Auth0, Okta, Cognito, Clerk, Supabase). Algorithm-confusion attacks blocked at the allowlist. `'none'` rejected unconditionally. |
 | Late-write protection | `_epoch` counter on `IngeniumContext` — orphaned-handler writes after a timeout are detected and discarded | Stops cross-request response corruption when the pool recycles the context. |
 
 Wire all of these in production:
@@ -125,6 +125,7 @@ import {
   ingenium, sessionMiddleware, gracefulShutdown,
   IdempotencyMemoryStore,
 } from 'ingenium'
+import { jwtMiddleware } from 'ingenium-auth'   // JWT/API-key live in their own package
 
 const app = ingenium({
   trustProxy: 'loopback',                  // behind nginx / Caddy / etc.
@@ -139,7 +140,7 @@ app.use(sessionMiddleware({ secret: [process.env.SESSION_SECRET!] }))
 app.use(ingenium.rateLimit({ windowMs: 60_000, limit: 100 }))
 app.use(ingenium.idempotency({ store: new IdempotencyMemoryStore() }))   // swap for RedisIdempotencyStore (ingenium-redis) for multi-instance
 app.use(ingenium.problemDetails({ typeBaseUrl: 'https://api.example.com/errors/' }))
-app.use(ingenium.jwt({
+app.use(jwtMiddleware({                          // from ingenium-auth
   algorithms: ['RS256'],
   jwksUrl: 'https://example.auth0.com/.well-known/jwks.json',
   issuer: 'https://example.auth0.com/',
@@ -163,6 +164,9 @@ npm install ingenium
 Optional packages by use case:
 
 ```sh
+# JWT + API-key authentication middleware
+npm install ingenium ingenium-auth
+
 # Bun.serve adapter
 npm install ingenium ingenium-bun
 

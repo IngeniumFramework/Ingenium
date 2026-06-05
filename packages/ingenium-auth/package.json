@@ -1,0 +1,51 @@
+{
+  "name": "ingenium-auth",
+  "version": "0.0.5",
+  "description": "JWT and API-key authentication middleware for Ingenium. JWKS verification with SSRF/key-confusion hardening and constant-time API-key checks. Extracted from core so apps that don't authenticate pay nothing for it.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "jwt",
+    "jwks",
+    "api-key",
+    "auth",
+    "authentication",
+    "middleware",
+    "ingenium"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "ingenium": "*"
+  },
+  "peerDependenciesMeta": {
+    "ingenium": {
+      "optional": false
+    }
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  }
+}

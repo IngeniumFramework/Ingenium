@@ -9,7 +9,8 @@
       "ingenium-compat": ["./packages/ingenium-compat/src/index.ts"],
       "ingenium-bun": ["./packages/ingenium-bun/src/index.ts"],
       "ingenium-cli": ["./packages/ingenium-cli/src/cli.ts"],
-      "ingenium-redis": ["./packages/ingenium-redis/src/index.ts"]
+      "ingenium-redis": ["./packages/ingenium-redis/src/index.ts"],
+      "ingenium-auth": ["./packages/ingenium-auth/src/index.ts"]
     }
   },
   "include": [
@@ -22,6 +23,8 @@
     "packages/ingenium-cli/src/**/*",
     "packages/ingenium-cli/test/**/*",
     "packages/ingenium-redis/src/**/*",
-    "packages/ingenium-redis/test/**/*"
+    "packages/ingenium-redis/test/**/*",
+    "packages/ingenium-auth/src/**/*",
+    "packages/ingenium-auth/test/**/*"
   ]
 }
