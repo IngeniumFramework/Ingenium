@@ -1,6 +1,6 @@
 {
   "name": "ingenium-cli",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Project scaffolder CLI for Ingenium.",
   "type": "module",
   "bin": {

@@ -78,7 +78,7 @@ deferred items and likely-to-shift surfaces.
   before the 404/405 surfaces. Previously a request to an unregistered
   path 404'd before any middleware fired.
 
-## [0.0.4] - 2026-06-05
+## [0.0.5] - 2026-06-05
 
 Security release — two highs and several mediums from a multi-agent audit, plus
 follow-up hardening. All findings were adversarially verified before fixing.
