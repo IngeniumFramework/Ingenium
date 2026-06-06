@@ -1,6 +1,6 @@
 # API reference
 
-This is the per-module reference for Ingenium v0.0.1. The locked public surface — what code outside the framework is allowed to import — lives in [`API.md`](../../API.md) at the repo root. The pages here go deeper: every exported function, class, type, option, throw, and edge case, grounded in the source under [`packages/ingenium/src`](../../packages/ingenium/src).
+This is the per-module reference for the core `ingenium` package. The locked public surface — what code outside the framework is allowed to import — lives in [`API.md`](../../API.md) at the repo root. The pages here go deeper: every exported function, class, type, option, throw, and edge case, grounded in the source under [`packages/ingenium/src`](../../packages/ingenium/src).
 
 If something in these pages disagrees with the actual source, the source wins — please open an issue.
 
@@ -25,3 +25,20 @@ If something in these pages disagrees with the actual source, the source wins �
 - Every code block uses TypeScript fences. Import from `'ingenium'` unless noted.
 - Names follow the v0.0.1 rename: `ingenium()` factory, `Ingenium*` classes (`IngeniumApp`, `IngeniumContext`, `IngeniumBody`, `IngeniumError`, …), `ingenium.*` static helpers (`ingenium.json`, `ingenium.cors`, `ingenium.static`, `ingenium.sse`, `ingenium.rateLimit`).
 - Anything marked `@internal` in the source is documented for context only — do not depend on it; semver does not apply.
+
+## Companion packages
+
+These pages cover the core `ingenium` package only. Some surfaces ship as
+separate packages and are documented alongside their source:
+
+- **JWT + API-key auth** — `jwtMiddleware`, `apiKeyMiddleware`, `verifyJwt`,
+  JWKS helpers — live in [`ingenium-auth`](../../packages/ingenium-auth)
+  (`import { jwtMiddleware, apiKeyMiddleware } from 'ingenium-auth'`). They are
+  no longer exported from core `ingenium`.
+- **Redis session/rate-limit stores** live in
+  [`ingenium-redis`](../../packages/ingenium-redis).
+- **Bun transport** (`BunAdapter`) lives in
+  [`ingenium-bun`](../../packages/ingenium-bun); see also
+  [transports.md](./transports.md).
+- **Express compat shim** is summarized in [compat.md](./compat.md) and lives in
+  [`ingenium-compat`](../../packages/ingenium-compat).

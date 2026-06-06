@@ -29,7 +29,7 @@ Each step prints `Listening on http://localhost:3000` once it's up. The top of e
 
 ## What's NOT here
 
-The path covers the everyday surface — the production stack (CORS, CSRF, rate-limit, idempotency, JWT, OpenAPI, sessions in Redis, graceful shutdown) is one config call away from any of these examples. See the [root README](../../README.md#production-hardening) once you're through step 8.
+The path covers the everyday surface. The rest of the production stack is one config call away from any of these examples: CORS, CSRF, rate-limit, idempotency, OpenAPI, sessions, and graceful shutdown ship in core `ingenium`, while JWT and API-key auth live in the separate [`ingenium-auth`](../../packages/ingenium-auth) package (`import { jwtMiddleware, apiKeyMiddleware } from 'ingenium-auth'`) and Redis-backed sessions in [`ingenium-redis`](../../packages/ingenium-redis). See the [root README](../../README.md#production-hardening) once you're through step 8.
 
 ## Where to go next
 

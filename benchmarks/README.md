@@ -1,28 +1,65 @@
 # Ingenium Benchmarks
 
-Local regression benchmarks comparing Ingenium against Express on identical
-workloads. Each scenario boots both frameworks on ephemeral `127.0.0.1` ports,
-runs `autocannon` against each, and prints a side-by-side comparison.
+Local regression benchmarks comparing Ingenium against Express, Fastify, and
+Hono on identical workloads, runs `autocannon` against each, and prints a
+side-by-side comparison.
+
+There are two suites:
+
+- **v2 (use this)** — each framework runs in its own child process; 1 warmup +
+  5 sampled runs per framework; mean / std-dev / median / p99 reported; Express,
+  Fastify, Hono, and Ingenium compared. Lives in [`scenarios/v2/`](scenarios/v2)
+  with its own [methodology README](scenarios/v2/README.md). Run with the
+  `*-v2` scripts below.
+- **v1 (deprecated)** — booted Express and Ingenium in the *same* Node process
+  and took a single 10s shot, so the second framework was effectively
+  benchmarking the steady-state of the first. Kept only for historical
+  comparison; prefer v2 for any new measurement.
 
 ## Mandatory disclaimer
 
 > These benchmarks are run on a developer machine and are NOT publishable
 > performance claims. Production-grade comparison numbers require dedicated
 > isolated hardware (no other processes), thermal-stable environment, multiple
-> runs with std-dev reported, and Express/Fastify/Hono baselines maintained at
-> their latest released versions. Treat these scenarios as regression detectors
-> during development, not marketing material.
+> runs with std-dev reported, and Express/Fastify/Hono baselines pinned to
+> deliberate, reviewable versions (see the `//competitor-pins` note in
+> `package.json`). Treat these scenarios as regression detectors during
+> development, not marketing material.
 
-## Scenarios
+## Scenarios (v2 — recommended)
 
-| Script              | Command                  | What it measures                                    |
-| ------------------- | ------------------------ | --------------------------------------------------- |
-| `hello.ts`          | `npm run bench:hello`    | Bare `GET /` JSON response — router + serializer.   |
-| `body-json.ts`      | `npm run bench:body`     | `POST /echo` with JSON parsing + echo timestamp.    |
-| `middleware-stack.ts` | `npm run bench:middleware` | 10-layer middleware chain overhead per request.    |
-| `error-path.ts`     | `npm run bench:errors`   | Cost of routing through the framework error boundary. |
+Separate-process, multi-sample, four-framework matrix (Express, Fastify, Hono,
+Ingenium). See [`scenarios/v2/README.md`](scenarios/v2/README.md) for the full
+methodology and the server contract.
 
-Run all sequentially:
+| Scenario        | Command                       | What it measures                                       |
+| --------------- | ----------------------------- | ------------------------------------------------------ |
+| `hello`         | `npm run bench:hello-v2`      | `GET /` returning a tiny JSON object.                  |
+| `body`          | `npm run bench:body-v2`       | `POST /echo` echoing a small JSON body.                |
+| `middleware`    | `npm run bench:middleware-v2` | `GET /` through 10 middleware layers.                  |
+| `payload-1kb`   | `npm run bench:payload-1kb-v2`   | `POST /echo` echoing a deterministic ~1KB JSON body.   |
+| `payload-100kb` | `npm run bench:payload-100kb-v2` | `POST /echo` echoing a deterministic ~100KB JSON body. |
+
+Run all v2 scenarios sequentially:
+
+```sh
+npm run bench:v2
+```
+
+The payload bodies are built in-process from a fixed seed (no committed
+fixtures), so every framework echoes byte-identical bytes; the actual byte size
+is printed before each run.
+
+## Scenarios (v1 — deprecated, same-process)
+
+| Script                | Command                    | What it measures                                      |
+| --------------------- | -------------------------- | ----------------------------------------------------- |
+| `hello.ts`            | `npm run bench:hello`      | Bare `GET /` JSON response — router + serializer.     |
+| `body-json.ts`        | `npm run bench:body`       | `POST /echo` with JSON parsing + echo timestamp.      |
+| `middleware-stack.ts` | `npm run bench:middleware` | 10-layer middleware chain overhead per request.       |
+| `error-path.ts`       | `npm run bench:errors`     | Cost of routing through the framework error boundary. |
+
+Run all v1 scenarios sequentially:
 
 ```sh
 npm run bench:all
@@ -30,19 +67,23 @@ npm run bench:all
 
 ## autocannon configuration
 
-All scenarios use:
-
-- `-c 100` (100 concurrent connections)
-- `-d 10` (10 second duration)
-- Bind: `127.0.0.1` on an OS-assigned ephemeral port (`port: 0`)
+- **v2**: `-c 100 -d 5` per run, with one discarded warmup run plus 5 sampled
+  runs per framework. Each framework runs in its own child process bound to
+  `127.0.0.1:0`; the runner reads `READY:<port>` from the child's stdout, then
+  drives autocannon against it.
+- **v1**: `-c 100 -d 10`, single shot, both frameworks in the same process,
+  bound to `127.0.0.1` on an OS-assigned ephemeral port (`port: 0`).
 
 Reported metrics per scenario:
 
-- `Requests/sec (avg)`
-- `Latency p50` / `p99` / `avg` (ms)
-- `Throughput` (bytes/sec)
-- `Total requests`, `Errors`, `Non-2xx`, `Timeouts`
-- `Rift / Express` ratio column — exact, no rounding-up
+- v2 reports, across the 5 sampled runs per framework: requests/sec
+  (mean, std-dev, median), latency p99, and best-effort `server RSS (MB)`
+  sampled from the framework's own child process. A delta smaller than 1
+  std-dev is noise; a run with std-dev wider than ~5% of the mean should not be
+  quoted.
+- v1 reports a single run's `Requests/sec (avg)`, `Latency p50`/`p99`/`avg`
+  (ms), `Throughput` (bytes/sec), `Total requests`/`Errors`/`Non-2xx`/
+  `Timeouts`, and an Ingenium-vs-Express ratio column.
 
 ## Methodology
 
@@ -100,9 +141,24 @@ benchmarks/
   package.json
   README.md
   scenarios/
-    _shared.ts            # autocannon runner + comparison printer
-    hello.ts
+    _shared.ts              # v1 autocannon runner + comparison printer
+    hello.ts                # v1 (deprecated, same-process)
     body-json.ts
     middleware-stack.ts
     error-path.ts
+    v2/                     # v2 (recommended, separate-process, multi-sample)
+      README.md             # v2 methodology + server contract
+      _runner.ts            # spawns each framework, samples 5 runs, prints table
+      run-all.ts            # bench:v2 entry — runs every scenario
+      hello.ts
+      body.ts
+      middleware.ts
+      payload-1kb.ts
+      payload-100kb.ts
+      _servers/             # one server file per framework × scenario
+        _payload.ts         # deterministic in-process payload builder
+        {express,fastify,hono,rift}-{hello,body,middleware,payload-1kb,payload-100kb}.ts
 ```
+
+(The Ingenium server files are named `rift-*.ts` — a holdover from the
+framework's former name.)

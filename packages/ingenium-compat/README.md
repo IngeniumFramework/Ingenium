@@ -18,20 +18,24 @@ npm add ingenium ingenium-compat
 ## Use
 
 ```ts
-import { Ingenium } from 'ingenium'
+import { ingenium } from 'ingenium'
 import { expressCompat } from 'ingenium-compat'
 import helmet from 'helmet'
 import cors from 'cors'
 
-const app = new Ingenium()
+const app = ingenium()
 
 app.use(expressCompat(helmet()))
 app.use(expressCompat(cors()))
 
 app.get('/', () => ({ ok: true }))
 
-app.listen(3000)
+await app.listen(3000)
 ```
+
+`expressCompat(mw)` returns an `IngeniumMiddleware`. The cost is opt-in and
+localized — only requests that pass through a wrapped middleware pay for it;
+native handlers and native middleware run at full speed.
 
 ## Supported middleware
 
@@ -42,6 +46,23 @@ partially supported (session-backed strategies need a session store).
 
 See [`COMPATIBILITY.md`](./COMPATIBILITY.md) for the full matrix, per-middleware
 notes, and how the shim works.
+
+## Exports
+
+| Export | Kind | Purpose |
+| --- | --- | --- |
+| `expressCompat(mw, opts?)` | function | Wrap an Express `(req, res, next)` middleware as an `IngeniumMiddleware`. |
+| `ExpressMiddleware` | type | The Express-style middleware signature it accepts. |
+| `ExpressCompatOptions` | type | Options bag (see below). |
+| `createReqShim` / `IngeniumReqShim` | function / class | The `Readable` request shim wired to the context (advanced/testing use). |
+| `createResShim` / `IngeniumResShim` | function / class | The `Writable` response shim wired to the context. |
+| `syncReqStateBack` | function | Mirror `req.*` mutations back into `ctx.state`. |
+
+`ExpressCompatOptions` currently only carries `allowKnownBroken?: boolean`, which
+is **deprecated and ignored** — the shims are now real Node streams, so the
+middleware that used to be "known broken" (body-parser, multer, compression,
+express-session, …) work through `expressCompat`. The flag is kept only so older
+call sites keep compiling.
 
 ## License
 

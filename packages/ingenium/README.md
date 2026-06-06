@@ -13,7 +13,7 @@
 
 Ingenium is what happens if you fix Express's three structural problems — linear routing, untyped `req`/`res`, and per-request allocation — without forcing developers to learn a new mental model. It's the same shape (`app.get`, `app.use`, mountable routers, drop-in middleware), with a typed `ctx` instead of `(req, res, next)`, and a router/dispatcher built for current-decade Node throughput.
 
-**Status: alpha (v0.0.1).** API is mostly settled but still subject to change before 0.1.0. Use it for side projects and internal tools; revisit for production once 1.0 lands.
+**Status: alpha (v0.0.5).** API is mostly settled but still subject to change before 0.1.0. Use it for side projects and internal tools; revisit for production once 1.0 lands.
 
 ---
 
@@ -32,6 +32,7 @@ Ingenium is what happens if you fix Express's three structural problems — line
   - [Errors](#errors)
   - [Plugins](#plugins)
   - [Trust-proxy](#trust-proxy)
+  - [Cookies](#cookies)
 - [Built-in middleware](#built-in-middleware)
   - [`ingenium.json` / `ingenium.urlencoded`](#ingeniumjson--ingeniumurlencoded)
   - [`ingenium.static`](#ingeniumstatic)
@@ -40,6 +41,13 @@ Ingenium is what happens if you fix Express's three structural problems — line
   - [`ingenium.rateLimit`](#ingeniumratelimit)
   - [`ingenium.csrf`](#ingeniumcsrf)
   - [`sessionMiddleware`](#sessionmiddleware)
+  - [`ingenium.idempotency`](#ingeniumidempotency)
+  - [`ingenium.problemDetails`](#ingeniumproblemdetails)
+- [Content negotiation](#content-negotiation)
+- [Background jobs](#background-jobs)
+- [Cron scheduling](#cron-scheduling)
+- [OpenAPI 3.1 generation](#openapi-31-generation)
+- [Sinatra-style top-level](#sinatra-style-top-level)
 - [Transports](#transports)
   - [Node `http` (default)](#node-http-default)
   - [Bun.serve](#bunserve)
@@ -115,7 +123,7 @@ Native primitives an API team actually needs in prod, all opt-in:
 | `ctx.json()` safety on circular refs / BigInt | Throws `IngeniumUnserializableError` (500) with the structural reason | No more useless `TypeError: Converting circular...` bubbling up as a generic 500. `safeJsonStringify(value)` exported for lenient mode. |
 | Idempotency-Key — skip caching 5xx | `ingenium.idempotency({ cacheable: (s) => s < 500 })` (default) | A transient 500 no longer gets replayed for the entire TTL. |
 | Compat shim — real-stream Express drop-in | `expressCompat(mw)` runs `(req, res, next)` middleware on real Node streams (`req` is a `Readable`, `res` a `Writable`) | `body-parser`, `multer`, `compression`, `express-session`, `morgan` all work end-to-end; cost is opt-in per wrapped middleware. |
-| Asymmetric JWT (RS/PS/ES + JWKS) | `ingenium.jwt({ algorithms: ['RS256'], jwksUrl: '...' })` | Required for any IdP with a JWKS endpoint (Auth0, Okta, Cognito, Clerk, Supabase). Algorithm-confusion attacks blocked at the allowlist. `'none'` rejected unconditionally. |
+| Asymmetric JWT (RS/PS/ES + JWKS) | `jwtMiddleware({ algorithms: ['RS256'], jwksUrl: '...' })` from [`ingenium-auth`](packages/ingenium-auth) | Required for any IdP with a JWKS endpoint (Auth0, Okta, Cognito, Clerk, Supabase). Algorithm-confusion attacks blocked at the allowlist. `'none'` rejected unconditionally. |
 | Late-write protection | `_epoch` counter on `IngeniumContext` — orphaned-handler writes after a timeout are detected and discarded | Stops cross-request response corruption when the pool recycles the context. |
 
 Wire all of these in production:
@@ -125,6 +133,7 @@ import {
   ingenium, sessionMiddleware, gracefulShutdown,
   IdempotencyMemoryStore,
 } from 'ingenium'
+import { jwtMiddleware } from 'ingenium-auth'   // JWT/API-key live in their own package
 
 const app = ingenium({
   trustProxy: 'loopback',                  // behind nginx / Caddy / etc.
@@ -139,7 +148,7 @@ app.use(sessionMiddleware({ secret: [process.env.SESSION_SECRET!] }))
 app.use(ingenium.rateLimit({ windowMs: 60_000, limit: 100 }))
 app.use(ingenium.idempotency({ store: new IdempotencyMemoryStore() }))   // swap for RedisIdempotencyStore (ingenium-redis) for multi-instance
 app.use(ingenium.problemDetails({ typeBaseUrl: 'https://api.example.com/errors/' }))
-app.use(ingenium.jwt({
+app.use(jwtMiddleware({                          // from ingenium-auth
   algorithms: ['RS256'],
   jwksUrl: 'https://example.auth0.com/.well-known/jwks.json',
   issuer: 'https://example.auth0.com/',
@@ -163,6 +172,9 @@ npm install ingenium
 Optional packages by use case:
 
 ```sh
+# JWT + API-key authentication middleware
+npm install ingenium ingenium-auth
+
 # Bun.serve adapter
 npm install ingenium ingenium-bun
 
@@ -177,7 +189,7 @@ npm install -g ingenium-cli
 ingenium new my-api
 ```
 
-**Requirements:** Node 20+. Bun 1.1+ for the Bun adapter. WebSocket support requires installing `ws` as a peer dep.
+**Requirements:** Node.js 20+. Node 24 LTS is recommended (see `.nvmrc`). Bun 1.1+ for the Bun adapter. WebSocket support requires installing `ws` as a peer dep.
 
 ---
 
@@ -428,6 +440,27 @@ Mirrors Express's `app.set('trust proxy', ...)`:
 | `string[]` | Multiple of any of the above |
 | `(ip, hopIdx) => boolean` | Custom predicate |
 
+### Cookies
+
+First-class cookie API on `ctx.cookies`, lazily allocated — routes that never read or write a cookie pay nothing.
+
+```ts
+app.get('/prefs', (ctx) => {
+  const theme = ctx.cookies.get('theme') ?? 'light'
+  ctx.cookies.set('seen', '1', { maxAge: 86_400, httpOnly: true, sameSite: 'lax' })
+  return { theme }
+})
+```
+
+| Method | Behavior |
+|---|---|
+| `ctx.cookies.get(name, { signed? })` | Read one cookie; `null` if absent. `{ signed: true }` verifies the HMAC suffix, returning `null` on tamper. |
+| `ctx.cookies.all()` | Snapshot of every parsed cookie (signed values keep their `value.sig` suffix). |
+| `ctx.cookies.set(name, value, opts?)` | Append a `Set-Cookie` (calls accumulate). Supports `domain`, `path`, `expires`, `maxAge`, `httpOnly`, `secure`, `sameSite`, `priority`, `partitioned`, `signed`. |
+| `ctx.cookies.clear(name, { domain?, path? })` | Expire a cookie (`Max-Age=0` + a past `Expires`, mirroring `domain`/`path` so the browser removes the right one). |
+
+**Signed cookies** are HMAC-SHA-256'd. Configure the app with `ingenium({ cookieSecrets: [process.env.COOKIE_SECRET!] })` — index 0 signs, every entry verifies (rotation-safe). Calling `.set(..., { signed: true })` with no secrets configured throws `IngeniumError(500, 'COOKIE_SECRET_MISSING')`.
+
 ---
 
 ## Built-in middleware
@@ -569,6 +602,122 @@ app.post('/logout', async (ctx) => {
 ```
 
 HMAC-SHA256-signed cookies, 18-byte (144-bit) ids, `crypto.timingSafeEqual` verification, secret rotation (index 0 signs, all entries verify), `regenerate()` for post-login fixation defense, pluggable `SessionStore` interface (default `SessionMemoryStore`).
+
+### `ingenium.idempotency`
+
+```ts
+import { ingenium, IdempotencyMemoryStore } from 'ingenium'
+
+app.use(ingenium.idempotency({
+  store: new IdempotencyMemoryStore(),   // swap for RedisIdempotencyStore in prod
+  ttlSeconds: 86_400,                    // how long a key's response is replayed
+  cacheable: (status) => status < 500,   // default: cache 2xx/3xx/4xx, never 5xx
+  // scope: (ctx) => ctx.state.user.id,  // isolate keys per client (see below)
+}))
+```
+
+Replays the stored response for any request that repeats an `Idempotency-Key` header, so a retried `POST` doesn't double-charge. Keys are scoped by the `Authorization` header by default; an **unauthenticated** cacheable route with no `Authorization` is bypassed (not cached) with a dev warning — one client's response must never leak to another, so supply an explicit `scope` for public endpoints. A transient 5xx is never cached, so it isn't replayed for the whole TTL.
+
+### `ingenium.problemDetails`
+
+```ts
+app.use(ingenium.problemDetails({ typeBaseUrl: 'https://api.example.com/errors/' }))
+```
+
+Serializes thrown `IngeniumError`s as RFC 7807 `application/problem+json` (`{ type, title, status, detail, ... }`) instead of the default `{ error, code }` shape, with `type` derived from the error `code` against `typeBaseUrl`. `toProblemDetails(err, opts)` is exported if you want to build the object yourself.
+
+---
+
+## Content negotiation
+
+Express-style `Accept` negotiation, parameterized so it works on any `{ headers }`:
+
+```ts
+import { accepts, formatResponse } from 'ingenium'
+
+app.get('/data', (ctx) => {
+  switch (accepts(ctx, 'json', 'html')) {     // best match, or false
+    case 'json': return { ok: true }
+    case 'html': return '<b>ok</b>'
+    default:     return ctx.json({ ok: true })
+  }
+})
+
+// Or branch declaratively, res.format-style:
+app.get('/report', (ctx) => formatResponse(ctx, {
+  'application/json': () => ({ ok: true }),
+  'text/html':        () => '<h1>Report</h1>',
+  default:            () => 'ok',             // omit → 406 Not Acceptable on no match
+}))
+```
+
+`accepts(ctx)` returns the full preference-ordered list; `accepts(ctx, ...types)` returns the best match (shorthand like `'json'` or a full mime) or `false`. `acceptsCharsets`, `acceptsLanguages`, and `acceptsEncodings` cover the other `Accept-*` headers. For conditional GETs, `isFresh(reqHeaders, resHeaders)`, `computeEtag(body)`, and `respondJsonWithEtag(ctx, body)` give you ETag / `If-None-Match` → 304 handling.
+
+## Background jobs
+
+In-process FIFO queues with a worker pool, retries, and a dead-letter list. Register a worker on the app; enqueue from any handler via `ctx.queue(name)`:
+
+```ts
+const app = ingenium()
+
+app.queue('emails', { concurrency: 4, retries: 3 }, async (job) => {
+  await sendEmail(job.data)              // throw → retried per the backoff policy
+})
+
+app.post('/signup', async (ctx) => {
+  const user = await createUser(await ctx.body.json())
+  await ctx.queue('emails').add({ to: user.email, body: 'Welcome!' })
+  return ctx.json({ ok: true }, 201)     // returns now; the email runs in the background
+})
+```
+
+`retries` is `{ attempts, backoffMs(attempt) }` or a number shorthand (default 3 attempts at 100 ms / 400 ms / 1.6 s, exponential). A job that exhausts its retries moves to the dead-letter list and fires `onFailed`. The default `MemoryQueueStore` keeps everything in process; implement the `QueueStore` interface — or use `RedisQueueStore` from [`ingenium-redis`](packages/ingenium-redis) — to persist across instances.
+
+## Cron scheduling
+
+```ts
+app.cron('0 */15 * * *', () => refreshCaches())                 // every 15 minutes (UTC)
+app.cron('0 0 * * 0', { timezone: 'America/Los_Angeles' }, weeklyReport)
+```
+
+Standard 5-field cron with an IANA `timezone` (default UTC). Handlers receive `{ firedAt, now }` so they can detect drift. `overlap: 'skip'` (default) drops a tick while the previous run is still in flight; `'queue'` holds exactly one pending run. The wake timer is `unref()`'d, so a cron alone never keeps the event loop alive — an app with an HTTP listener runs normally, a standalone script exits when its other work finishes.
+
+## OpenAPI 3.1 generation
+
+Generate a spec straight from the registration journal — no decorators, no separate route table:
+
+```ts
+import { ingenium, generateOpenApi } from 'ingenium'
+
+const spec = generateOpenApi(app, {
+  info: { title: 'Notes API', version: '1.0.0' },
+  servers: [{ url: 'https://api.example.com' }],
+  tagsByPrefix: { '/users': 'users', '/notes': 'notes' },   // auto-tag by path prefix
+})
+
+// …or serve it lazily (cache invalidates as routes are added):
+app.get('/openapi.json', ingenium.openapiHandler({
+  info: { title: 'Notes API', version: '1.0.0' },
+}))
+```
+
+Path params (`:id` → `{id}`, `*rest` → `{rest}`) and operations are derived automatically. Request/response schemas exposing a `toJsonSchema()` method (Zod 3.24+, ArkType, Effect Schema) are converted inline; Standard Schema validators that can't be introspected emit an `x-schema-source` TODO marker. `excludePaths` hides internal routes.
+
+## Sinatra-style top-level
+
+Skip the app object entirely — import the verbs and `listen` directly. Every call routes to a single lazy default app:
+
+```ts
+import { get, post, listen } from 'ingenium'
+
+get('/', () => 'hi')
+get('/users/:id', (ctx) => ({ id: ctx.params.id }))
+post('/echo', async (ctx) => ctx.body.json())
+
+await listen(3000)
+```
+
+`get`/`post`/`put`/`patch`/`delete`/`head`/`options`, plus `use`, `onError`, `before`, `after`, and `listen`, are exported as top-level functions with the same signatures as their `app.*` counterparts. Handy for scripts and tiny services; reach for an explicit `ingenium()` once you need more than one app or want to pass it around.
 
 ---
 
@@ -818,7 +967,8 @@ npm run dev
 
 | Package | Description |
 |---|---|
-| [`ingenium`](packages/ingenium) | Core framework — `ingenium()`, `Router`, `IngeniumContext`, plugins, static, CORS, SSE, rate-limit, sessions, multipart, transports |
+| [`ingenium`](packages/ingenium) | Core framework — `ingenium()`, `Router`, `IngeniumContext`, plugins, static, CORS, SSE, rate-limit, sessions, multipart, cookies, jobs, cron, OpenAPI, transports |
+| [`ingenium-auth`](packages/ingenium-auth) | `jwtMiddleware`, `apiKeyMiddleware` — JWT (HMAC / asymmetric / JWKS) and API-key authentication |
 | [`ingenium-compat`](packages/ingenium-compat) | `expressCompat(mw)` shim for `(req, res, next)` middleware |
 | [`ingenium-bun`](packages/ingenium-bun) | `BunAdapter` — drop-in transport for `Bun.serve()` |
 | [`ingenium-cli`](packages/ingenium-cli) | `ingenium new <name> [--bun\|--minimal]` scaffolder |
@@ -857,7 +1007,8 @@ Five [Architecture Decision Records](docs/adr/) document the load-bearing choice
 ```
 ingenium/
 ├── packages/
-│   ├── ingenium/              # core
+│   ├── ingenium/              # core (router, context, middleware, jobs, cron, OpenAPI)
+│   ├── ingenium-auth/         # JWT + API-key authentication
 │   ├── ingenium-compat/       # Express middleware shim
 │   ├── ingenium-bun/          # Bun.serve adapter
 │   ├── ingenium-redis/        # Redis stores (sessions, idempotency, rate-limit, job queue)

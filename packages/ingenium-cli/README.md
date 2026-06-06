@@ -47,8 +47,11 @@ ingenium new my-api --force
 
 The generated project includes:
 
-- `package.json` (with `ingenium` dependency, `tsx` for dev/start)
-- `tsconfig.json` (strict)
+- `package.json` — the `default`/`minimal` templates depend on `ingenium` and use
+  `tsx` for `dev`/`start`; the `--bun` template additionally depends on
+  `ingenium-bun` and uses `bun --watch` / `bun` for its scripts.
+- `tsconfig.json` (strict; `NodeNext` for default/minimal, `Bundler` + `bun`
+  types for `--bun`)
 - `src/index.ts` (template-specific entrypoint)
 - `.gitignore`
 - `README.md`
