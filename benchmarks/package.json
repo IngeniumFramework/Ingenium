@@ -20,7 +20,7 @@
   "//competitor-pins": "Competitor framework versions are pinned to EXACT versions (no ^/~). Comparative numbers are only meaningful against pinned deps: a silent minor bump of any competitor would shift the baseline and make a regression indistinguishable from an upstream change. These are the versions resolved by the repo lockfile at the time of pinning. Bump them deliberately, in their own commit, so the version delta is reviewable alongside any bench movement.",
   "dependencies": {
     "@hono/node-server": "1.19.14",
-    "autocannon": "7.15.0",
+    "autocannon": "8.0.0",
     "express": "4.22.2",
     "fastify": "5.8.5",
     "hono": "4.12.18",
