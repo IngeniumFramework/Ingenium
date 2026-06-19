@@ -65,7 +65,7 @@ jobs:
           } | tee "bench-output-node${{ matrix.node }}.txt"
 
       - name: Upload bench output
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-output-node${{ matrix.node }}
           path: benchmarks/bench-output-node${{ matrix.node }}.txt
